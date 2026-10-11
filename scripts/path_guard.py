@@ -1,15 +1,36 @@
 """Shared output-path guard: refuse any write target under data/raw/ or the source dataset folder."""
 import os
+import re
+import socket
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DATASET_DIR = "D:/Cyber_DataSet/"  # source dataset folder, read only
+RAW_DIR = ROOT / "data" / "raw"  # raw layer, read only
+LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1", "[::1]", "0:0:0:0:0:0:0:1")  # UNC host names that mean this machine
+
+
+def normalise_windows_path(path):
+    """Rewrite extended, device and loopback-UNC forms of a path to the plain drive form, and drop NTFS stream suffixes."""
+    text = str(path).replace("\\", "/")
+    lowered = text.lower()
+    if lowered.startswith("//?/unc/") or lowered.startswith("//./unc/"):
+        text = "//" + text[8:]
+    elif lowered.startswith("//?/") or lowered.startswith("//./"):
+        text = text[4:]
+    pieces = text.split("/")
+    if text.startswith("//") and len(pieces) > 3 and pieces[2] != "":
+        host, share = pieces[2].lower(), pieces[3]
+        local = LOCAL_HOSTS + (socket.gethostname().lower(),)
+        if host in local and len(share) == 2 and share[1] == "$" and share[0].isalpha():
+            text = share[0] + ":/" + "/".join(pieces[4:])
+    return re.sub(r"::\$[^/]*", "", text)
 
 
 def resolved_parts(path):
-    """Return the lower-cased parts of a path after making it absolute and resolving `..`."""
-    return [part.lower() for part in Path(os.path.realpath(os.path.abspath(str(path)))).parts]
+    """Return the lower-cased parts of a path after normalising Windows forms, making it absolute and resolving `..` and links."""
+    return [part.lower() for part in Path(os.path.realpath(os.path.abspath(normalise_windows_path(path)))).parts]
 
 
 def is_under(path, folder):
@@ -18,13 +39,15 @@ def is_under(path, folder):
     return target[:len(base)] == base
 
 
-def forbidden_reason(path):
-    """Return why an output path is forbidden, or None when it is allowed."""
+def forbidden_reason(path, dataset_dir=None, raw_dir=None):
+    """Return why an output path is forbidden, or None when it is allowed; the folders default to the module constants."""
+    dataset_dir = DATASET_DIR if dataset_dir is None else dataset_dir
+    raw_dir = RAW_DIR if raw_dir is None else raw_dir
     parts = resolved_parts(path)
-    if is_under(path, ROOT / "data" / "raw") or any(parts[i] == "data" and parts[i + 1] == "raw" for i in range(len(parts) - 1)):
+    if is_under(path, raw_dir) or any(parts[i] == "data" and parts[i + 1] == "raw" for i in range(len(parts) - 1)):
         return "data/raw/"
-    if is_under(path, DATASET_DIR):
-        return "the source dataset folder " + DATASET_DIR
+    if is_under(path, dataset_dir):
+        return "the source dataset folder " + str(dataset_dir)
     return None
 
 

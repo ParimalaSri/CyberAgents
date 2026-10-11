@@ -324,13 +324,13 @@ def resolve_output(output, full):
     return str(output or (FULL_OUTPUT_PATH if full else OUTPUT_PATH))
 
 
-def main():
+def main(argv=None):
     """Run the stage end to end on the sample (default) or the full compressed source (--full)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="read the compressed full source in place (not for dev)")
     parser.add_argument("--input", help="override the input JSON lines path")
     parser.add_argument("--output", help="output parquet path (default: hosts.parquet, or hosts_full.parquet with --full)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     guard = load_guard()
     guard.use_utf8_output()
     input_path = args.input or (FULL_PATH if args.full else str(SAMPLE_PATH))

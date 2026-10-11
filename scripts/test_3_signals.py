@@ -14,6 +14,9 @@ STAGE_PATH = Path(__file__).resolve().parent.parent / "pipeline" / "3_signals.py
 SPEC = importlib.util.spec_from_file_location("signals_stage", STAGE_PATH)
 STAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STAGE)
+GUARD_SUPPORT_SPEC = importlib.util.spec_from_file_location("guard_test_support", Path(__file__).resolve().parent / "guard_test_support.py")
+GUARD_SUPPORT = importlib.util.module_from_spec(GUARD_SUPPORT_SPEC)
+GUARD_SUPPORT_SPEC.loader.exec_module(GUARD_SUPPORT)
 
 TS = datetime.datetime(2026, 9, 14, 10, 0, 0)
 HOST_DDL = (
@@ -47,6 +50,7 @@ def run_signals(hosts, companies=None, ips=None, country="US"):
             con.execute("INSERT INTO h VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [row[k] for k in HOST_ORDER])
         con.execute(f"COPY h TO '{Path(tmp, 'hosts.parquet').as_posix()}' (FORMAT PARQUET)")
         con.execute(f"CREATE TABLE c ({COMPANY_DDL})")
+        derived = companies is None
         if companies is None:
             companies = {}
             for r in hosts:
@@ -59,7 +63,7 @@ def run_signals(hosts, companies=None, ips=None, country="US"):
                         [f"id_{n}", n.title(), n, spec["source"], conf, spec["host_count"], spec["distinct_host_ips"], spec.get("country", country), 0, 0.0])
         con.execute(f"COPY c TO '{Path(tmp, 'companies.parquet').as_posix()}' (FORMAT PARQUET)")
         out = Path(tmp, "out", "signals.parquet")
-        counts = STAGE.run_stage(con, Path(tmp, "hosts.parquet"), Path(tmp, "companies.parquet"), out)
+        counts = STAGE.run_stage(con, Path(tmp, "hosts.parquet"), Path(tmp, "companies.parquet"), out, reconcile=derived)
         cur = con.execute(f"SELECT * FROM read_parquet('{out.as_posix()}') ORDER BY company_id")
         names = [d[0] for d in cur.description]
         return {r[2]: dict(zip(names, r)) for r in cur.fetchall()}, names, counts
@@ -319,7 +323,7 @@ class SignalStageTests(unittest.TestCase):
             con.execute(f"CREATE TABLE c ({COMPANY_DDL})")
             con.execute("INSERT INTO c VALUES ('id','A','a','org','high',1,1,'US',0,0.0), ('id','A','a','org','high',1,1,'US',0,0.0)")
             con.execute(f"COPY c TO '{Path(tmp, 'c.parquet').as_posix()}' (FORMAT PARQUET)")
-            with self.assertRaises(AssertionError):
+            with self.assertRaises(SystemExit):
                 STAGE.run_stage(con, Path(tmp, "h.parquet"), Path(tmp, "c.parquet"), Path(tmp, "o.parquet"))
 
 
@@ -411,18 +415,10 @@ class CliRobustnessTests(unittest.TestCase):
             self.assertTrue(out.exists())
 
     def test_output_under_raw_or_dataset_folder_refused(self):
-        """Outputs under data/raw (plain, with .., upper case) and under the dataset folder are refused and nothing is written."""
+        """Outputs (and reports) under scratch stand-ins for data/raw and the dataset folder, in every path form, are refused and nothing is written."""
         with tempfile.TemporaryDirectory() as tmp:
             src, comp = write_inputs(tmp, [host("acme")], [("id_acme", "Acme", "acme", 1)])
-            targets = [ROOT_DIR / "data" / "raw" / "qa_guard_test.parquet",
-                       str(ROOT_DIR / "data" / "silver" / ".." / "raw" / "qa_guard_test.parquet"),
-                       str(ROOT_DIR / "DATA" / "RAW" / "qa_guard_test.parquet"),
-                       "D:/Cyber_DataSet/qa_guard_test.parquet", "d:/CYBER_DATASET/sub/../qa_guard_test.parquet"]
-            for target in targets:
-                result = run_cli(["--hosts", src, "--companies", comp, "--output", target])
-                self.assertNotEqual(result.returncode, 0, str(target))
-                self.assertIn("refusing to write", result.stderr, str(target))
-                self.assertFalse(Path(target).exists(), str(target))
+            GUARD_SUPPORT.assert_stage_refuses(self, STAGE, ["--hosts", src, "--companies", comp], with_report=True, safe_dir=tmp)
 
 
 if __name__ == "__main__":

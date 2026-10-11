@@ -294,12 +294,27 @@ def build_accounts(con):
         ORDER BY {stage_order_sql('account_id')}
         """
     )
+
+
+def check_consistency(con):
+    """Exit with a readable message when accounts fan out, drop signals rows, lack a why or break a score or band invariant; runs before any write."""
     n_sig = con.execute("SELECT count(*) FROM signals").fetchone()[0]
     n_acc = con.execute("SELECT count(*) FROM accounts").fetchone()[0]
     uniq = con.execute("SELECT count(DISTINCT account_id) FROM accounts").fetchone()[0]
-    assert n_sig == n_acc == uniq, f"fan-out or drop: signals {n_sig}, accounts {n_acc}, distinct account_id {uniq}"
+    if not n_sig == n_acc == uniq:
+        sys.exit(f"accounts stage: inconsistent input, nothing written: fan-out or drop: signals {n_sig}, accounts {n_acc}, distinct account_id {uniq}")
     empty = con.execute("SELECT count(*) FROM accounts WHERE why IS NULL OR trim(why) = ''").fetchone()[0]
-    assert empty == 0, f"{empty} accounts with an empty why"
+    if empty:
+        sys.exit(f"accounts stage: inconsistent input, nothing written: {empty} accounts with an empty why")
+    bad = con.execute(
+        "SELECT count(*) FROM accounts WHERE fit_score NOT BETWEEN 0 AND 100 OR urgency_score NOT BETWEEN 0 AND 100 OR contact_score NOT BETWEEN 0 AND 100 "
+        "OR final_band <> band OR band = 'contact' OR band IS NULL OR band_uncapped IS NULL OR trim(why) = '' OR decision IS NOT NULL OR prompt_version IS NOT NULL").fetchone()[0]
+    if bad:
+        sys.exit(f"accounts stage: inconsistent input, nothing written: {bad} accounts break a basic invariant")
+    if CONTACT_FORM == "b":
+        viol = con.execute(f"SELECT count(*) FROM accounts WHERE contact_score > urgency_score OR contact_score * 100 < {FLOOR_PCT} * urgency_score - 50").fetchone()[0]
+        if viol:
+            sys.exit(f"accounts stage: inconsistent input, nothing written: {viol} accounts break FLOOR * urgency <= contact <= urgency")
 
 
 def write_output(con, output_path):
@@ -316,6 +331,7 @@ def run_stage(con, input_path, output_path, contact=THRESHOLD_CONTACT, review=TH
         raise ValueError(f"review_n ({review_n}) must not be negative")
     build_scored(con, input_path, contact, review, review_n)
     build_accounts(con)
+    check_consistency(con)
     write_output(con, output_path)
     return {"signals_rows": con.execute("SELECT count(*) FROM signals").fetchone()[0],
             "accounts_rows": con.execute("SELECT count(*) FROM accounts").fetchone()[0]}
@@ -542,7 +558,7 @@ def print_report(con, run, output_path, report_path, contact, review, review_n=R
     print(f"\nreport saved to {Path(report_path).as_posix()}")
 
 
-def main():
+def main(argv=None):
     """Run the stage on the sample signals (default) or the full-run file (--full); thresholds are command-line options."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="read signals_full, write accounts_full (not for dev)")
@@ -552,7 +568,7 @@ def main():
     parser.add_argument("--review", type=int, default=THRESHOLD_REVIEW, help="review threshold Y, the floor of the top-N review band (provisional default)")
     parser.add_argument("--review-n", type=int, default=REVIEW_N, help="N: total accounts in the review band, would-be contacts always kept (provisional default)")
     parser.add_argument("--report", help="report markdown path (default: outputs/dq for the default output, else next to --output)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     guard = load_guard()
     guard.use_utf8_output()
     if args.review >= args.contact:

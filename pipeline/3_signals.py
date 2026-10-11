@@ -170,10 +170,23 @@ def build_signals(con, companies_path):
         ORDER BY c.company_id
         """
     )
+
+
+def check_consistency(con, reconcile=True):
+    """Exit with a readable message when the signals table fans out, drops companies or does not reconcile to the member host rows; runs before any write."""
     n_comp = con.execute("SELECT count(*) FROM companies").fetchone()[0]
     n_sig = con.execute("SELECT count(*) FROM signals").fetchone()[0]
     uniq = con.execute("SELECT count(DISTINCT company_id) FROM signals").fetchone()[0]
-    assert n_sig == n_comp == uniq, f"fan-out or drop: companies {n_comp}, signals {n_sig}, distinct company_id {uniq}"
+    if not n_sig == n_comp == uniq:
+        sys.exit(f"signals stage: inconsistent input, nothing written: fan-out or drop: companies {n_comp}, signals {n_sig}, distinct company_id {uniq}")
+    if not reconcile:
+        return
+    members, counted = con.execute("SELECT count(*), count(*) FILTER (WHERE counted) FROM host_flags").fetchone()
+    sum_counted, sum_host = con.execute("SELECT coalesce(sum(counted_host_count), 0), coalesce(sum(host_count), 0) FROM signals").fetchone()
+    if sum_counted != counted:
+        sys.exit(f"signals stage: inconsistent input, nothing written: sum(counted_host_count) {sum_counted} != counted member host rows {counted}")
+    if sum_host != members:
+        sys.exit(f"signals stage: inconsistent input, nothing written: sum(host_count) {sum_host} != member host rows {members} (do the hosts and companies files belong together?)")
 
 
 def write_output(con, output_path):
@@ -182,10 +195,11 @@ def write_output(con, output_path):
     con.execute(f"COPY signals TO '{quote_path(output_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 
 
-def run_stage(con, hosts_path, companies_path, output_path):
+def run_stage(con, hosts_path, companies_path, output_path, reconcile=True):
     """Run flags, aggregate, join and write for one hosts and companies pair; return the row counts."""
     build_host_flags(con, hosts_path)
     build_signals(con, companies_path)
+    check_consistency(con, reconcile)
     write_output(con, output_path)
     return {"companies_rows": con.execute("SELECT count(*) FROM companies").fetchone()[0],
             "signals_rows": con.execute("SELECT count(*) FROM signals").fetchone()[0],
@@ -324,7 +338,7 @@ def print_report(con, run, output_path, report_path):
     print(f"redundancy and coverage diagnostics: python {STATS_SCRIPT.relative_to(ROOT).as_posix()} {Path(output_path).relative_to(ROOT).as_posix() if Path(output_path).is_relative_to(ROOT) else output_path}")
 
 
-def main():
+def main(argv=None):
     """Run the stage on the sample files (default) or the full-run files (--full)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="read hosts_full and companies_full, write signals_full (not for dev)")
@@ -332,7 +346,7 @@ def main():
     parser.add_argument("--companies", help="override the companies parquet path")
     parser.add_argument("--output", help="override the output parquet path")
     parser.add_argument("--report", help="report markdown path (default: outputs/dq for the default output, else next to --output)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     guard = load_guard()
     guard.use_utf8_output()
     hosts_path = args.hosts or (FULL_HOSTS_PATH if args.full else HOSTS_PATH)

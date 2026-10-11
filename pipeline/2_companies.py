@@ -116,6 +116,26 @@ def build_companies(con):
     )
 
 
+def check_consistency(con):
+    """Exit with a readable message when hosts or companies break a reconciliation rule; runs before any write."""
+    total = con.execute("SELECT count(*) FROM hosts").fetchone()[0]
+    rows = dict(con.execute("SELECT identity_source, count(*) FROM hosts GROUP BY 1").fetchall())
+    unknown = set(rows) - set(IDENTITY_SOURCES)
+    if unknown:
+        sys.exit(f"companies stage: inconsistent input, nothing written: unexpected identity_source values: {sorted(map(str, unknown))}")
+    has_reason = "infra_reason" in {r[0] for r in con.execute("DESCRIBE hosts").fetchall()}
+    reasons = {r for (r,) in con.execute("SELECT DISTINCT infra_reason FROM hosts WHERE is_infrastructure").fetchall()} if has_reason else set()
+    if reasons - set(INFRA_REASONS):
+        sys.exit(f"companies stage: inconsistent input, nothing written: infra_reason values outside the hosts contract set: {sorted(map(str, reasons - set(INFRA_REASONS)))}")
+    n = con.execute("SELECT count(*) FROM companies").fetchone()[0]
+    if n > total:
+        sys.exit(f"companies stage: inconsistent input, nothing written: companies {n} exceed hosts rows {total}")
+    member_rows = rows.get("org", 0) + rows.get("cert_o", 0)
+    members = con.execute("SELECT coalesce(sum(host_count), 0) FROM companies").fetchone()[0]
+    if members != member_rows:
+        sys.exit(f"companies stage: inconsistent input, nothing written: sum(host_count) {members} != member rows {member_rows}")
+
+
 def write_output(con, output_path):
     """Write table companies to the silver parquet path (zstd, ordered by company_id)."""
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +146,7 @@ def run_stage(con, hosts_path, output_path):
     """Run read, group and write for one hosts file; return the hosts and companies row counts."""
     build_members(con, hosts_path)
     build_companies(con)
+    check_consistency(con)
     write_output(con, output_path)
     hosts_rows = con.execute("SELECT count(*) FROM hosts").fetchone()[0]
     company_rows = con.execute("SELECT count(*) FROM companies").fetchone()[0]
@@ -310,14 +331,14 @@ def print_report(con, output_path, report_path):
     print(f"\nreport saved to {Path(report_path).as_posix()}")
 
 
-def main():
+def main(argv=None):
     """Run the stage on the sample hosts file (default) or the full-run hosts file (--full)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="read the full-run hosts file (not for dev)")
     parser.add_argument("--input", help="override the input hosts parquet path")
     parser.add_argument("--output", help="override the output companies parquet path")
     parser.add_argument("--report", help="report markdown path (default: outputs/dq for the default output, else next to --output)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     guard = load_guard()
     guard.use_utf8_output()
     hosts_path = args.input or (FULL_HOSTS_PATH if args.full else HOSTS_PATH)

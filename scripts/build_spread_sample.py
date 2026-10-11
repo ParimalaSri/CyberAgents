@@ -55,7 +55,7 @@ def read_lines_at(handle, offset, lines):
     return result
 
 
-def main():
+def main(argv=None):
     """Parse arguments, build the sample, and print a summary."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--src", required=True)
@@ -63,7 +63,7 @@ def main():
     ap.add_argument("--positions", type=int, default=1000)
     ap.add_argument("--lines", type=int, default=100)
     ap.add_argument("--seed", type=int, default=42)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     check_out_path(args.src, args.out)
     path_guard.check_output_path(args.out)
     size = os.path.getsize(args.src)

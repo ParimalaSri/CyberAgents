@@ -14,6 +14,9 @@ STAGE_PATH = Path(__file__).resolve().parent.parent / "pipeline" / "2_companies.
 SPEC = importlib.util.spec_from_file_location("companies_stage", STAGE_PATH)
 STAGE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(STAGE)
+GUARD_SUPPORT_SPEC = importlib.util.spec_from_file_location("guard_test_support", Path(__file__).resolve().parent / "guard_test_support.py")
+GUARD_SUPPORT = importlib.util.module_from_spec(GUARD_SUPPORT_SPEC)
+GUARD_SUPPORT_SPEC.loader.exec_module(GUARD_SUPPORT)
 
 COLUMNS = ("host_ip", "port", "org", "org_norm", "country_code", "cert_subject_o", "is_noise", "identity_source", "name_norm")
 
@@ -291,19 +294,11 @@ class CliRobustnessTests(unittest.TestCase):
         self.assertEqual((result.returncode, count), (0, 1), result.stderr[-500:])
 
     def test_output_under_raw_or_dataset_folder_refused(self):
-        """Outputs under data/raw (plain, with .., upper case) and under the dataset folder are refused and nothing is written."""
+        """Outputs (and reports) under scratch stand-ins for data/raw and the dataset folder, in every path form, are refused and nothing is written."""
         with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp, "hosts.parquet")
             write_hosts(src, [host("1.1.1.1", org="Acme", norm="acme")])
-            targets = [ROOT_DIR / "data" / "raw" / "qa_guard_test.parquet",
-                       str(ROOT_DIR / "data" / "silver" / ".." / "raw" / "qa_guard_test.parquet"),
-                       str(ROOT_DIR / "DATA" / "RAW" / "qa_guard_test.parquet"),
-                       "D:/Cyber_DataSet/qa_guard_test.parquet", "d:/CYBER_DATASET/sub/../qa_guard_test.parquet"]
-            for target in targets:
-                result = run_cli(["--input", src, "--output", target])
-                self.assertNotEqual(result.returncode, 0, str(target))
-                self.assertIn("refusing to write", result.stderr, str(target))
-                self.assertFalse(Path(target).exists(), str(target))
+            GUARD_SUPPORT.assert_stage_refuses(self, STAGE, ["--input", src], with_report=True, safe_dir=tmp)
 
 
 if __name__ == "__main__":
