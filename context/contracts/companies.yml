@@ -1,0 +1,85 @@
+# Contract for the companies silver layer (stage pipeline/2_companies.py), 14 columns (docs/ARCHITECTURE.md D8.4, rules D8.8).
+# Ranges come from MEANING, not from observed values.
+# Run from the repo root (the cross-file checks use relative paths):
+#   python .claude/skills/data-quality-check/scripts/check_contract.py context/contracts/companies.yml --report
+# Checks the generic runner cannot express (company_name denylist, independent recompute from hosts, sha256 equality in Python,
+# cross-file reconciliation, headline numbers):
+#   python .claude/skills/data-quality-check/scripts/check_companies_extra.py
+layer: companies
+path: data/silver/companies.parquet
+key: company_id          # one row per company, unique (D8.3); name_norm is a second unique key (custom check below)
+
+# row_rule: companies <= hosts (CLAUDE.md). Parent file: data/silver/hosts.parquet (stage 1 output, the only input of stage 2).
+# On the FULL run the stage reads data/silver/hosts_full.parquet and writes companies_full.parquet: change `path` here and
+# `other` below (and the cross-file paths in the custom checks) in the PR that promotes to prod; a contract changes only with a reason.
+row_rule:
+  other: data/silver/hosts.parquet
+  op: "<="
+
+columns:
+  company_id: {type: VARCHAR, nullable: false}
+  company_name: {type: VARCHAR, nullable: false}
+  name_norm: {type: VARCHAR, nullable: false}
+  identity_source: {type: VARCHAR, nullable: false}
+  identity_confidence: {type: VARCHAR, nullable: false}
+  org_host_count: {type: INTEGER, nullable: false, min: 0}
+  cert_o_host_count: {type: INTEGER, nullable: false, min: 0}
+  host_count: {type: INTEGER, nullable: false, min: 1}
+  distinct_host_ips: {type: INTEGER, nullable: false, min: 1}
+  distinct_port_count: {type: INTEGER, nullable: false, min: 1}
+  country_code: {type: VARCHAR}                       # null only when every host of the company has a null country
+  country_count: {type: INTEGER, nullable: false, min: 0}
+  noise_host_count: {type: INTEGER, nullable: false, min: 0}
+  noise_host_share: {type: DOUBLE, nullable: false, min: 0, max: 1}
+
+# Shared denylist leakage check on the name column. company_name (raw display text) is checked by check_companies_extra.py.
+denylist:
+  column: name_norm
+  rules: shared
+
+checks:
+  - name: exactly 14 columns (D8.4)
+    sql: "SELECT count(*) FROM (DESCRIBE t)"
+    expect: 14
+  - name: name_norm is unique (join key for stage 3, D8.5)
+    sql: "SELECT count(*) - count(DISTINCT name_norm) FROM t"
+  - name: company_id is 16 lowercase hex characters
+    sql: "SELECT count(*) FROM t WHERE NOT regexp_matches(company_id, '^[0-9a-f]{16}$')"
+  - name: company_id equals substr(sha256(name_norm), 1, 16) on every row (D8.3)
+    sql: "SELECT count(*) FROM t WHERE company_id IS DISTINCT FROM substr(sha256(name_norm), 1, 16)"
+  - name: company_name and name_norm are non-empty and trimmed (D8.8 rule 5)
+    sql: "SELECT count(*) FROM t WHERE trim(company_name) = '' OR company_name <> trim(company_name) OR trim(name_norm) = '' OR name_norm <> trim(name_norm)"
+  - name: identity_source in (org, cert_o)
+    sql: "SELECT count(*) FROM t WHERE identity_source NOT IN ('org', 'cert_o')"
+  - name: identity_confidence in (high, low)
+    sql: "SELECT count(*) FROM t WHERE identity_confidence NOT IN ('high', 'low')"
+  - name: identity_source org exactly when org_host_count > 0 (D8.3)
+    sql: "SELECT count(*) FROM t WHERE (identity_source = 'org') <> (org_host_count > 0)"
+  - name: identity_confidence high exactly when org_host_count > 0, low exactly when org_host_count = 0 (D8.1)
+    sql: "SELECT count(*) FROM t WHERE (identity_confidence = 'high') <> (org_host_count > 0) OR (identity_confidence = 'low') <> (org_host_count = 0)"
+  - name: host_count equals org_host_count + cert_o_host_count
+    sql: "SELECT count(*) FROM t WHERE host_count <> org_host_count + cert_o_host_count"
+  - name: distinct_host_ips and distinct_port_count are at most host_count
+    sql: "SELECT count(*) FROM t WHERE distinct_host_ips > host_count OR distinct_port_count > host_count"
+  - name: country_count = 0 exactly when country_code is null
+    sql: "SELECT count(*) FROM t WHERE (country_count = 0) <> (country_code IS NULL)"
+  - name: country_count at most distinct_host_ips (an IP has one country)
+    sql: "SELECT count(*) FROM t WHERE country_count > distinct_host_ips"
+  - name: country_code is two upper-case letters when present
+    sql: "SELECT count(*) FROM t WHERE country_code IS NOT NULL AND NOT regexp_matches(country_code, '^[A-Z]{2}$')"
+  - name: noise_host_share equals noise_host_count / (noise_host_count + host_count)
+    sql: "SELECT count(*) FROM t WHERE abs(noise_host_share - noise_host_count::DOUBLE / (noise_host_count + host_count)) > 1e-9"
+  - name: noise_host_count is 0 for a company with no org host (noise is attributed through org_norm, D8.4)
+    sql: "SELECT count(*) FROM t WHERE org_host_count = 0 AND noise_host_count > 0"
+  - name: cross-file, every company name_norm has at least one hosts row with identity_source org or cert_o (no company of only noise or infrastructure hosts)
+    sql: "SELECT count(*) FROM t WHERE name_norm NOT IN (SELECT name_norm FROM read_parquet('data/silver/hosts.parquet') WHERE identity_source IN ('org', 'cert_o') AND name_norm IS NOT NULL)"
+  - name: cross-file, every member name_norm in hosts exists in companies
+    sql: "SELECT count(DISTINCT name_norm) FROM read_parquet('data/silver/hosts.parquet') WHERE identity_source IN ('org', 'cert_o') AND name_norm NOT IN (SELECT name_norm FROM t)"
+  - name: cross-file, sum(host_count) equals hosts rows with identity_source org or cert_o (D8.8 rule 7)
+    sql: "SELECT (SELECT sum(host_count) FROM t) - (SELECT count(*) FROM read_parquet('data/silver/hosts.parquet') WHERE identity_source IN ('org', 'cert_o'))"
+  - name: cross-file, sum(org_host_count) equals hosts rows with identity_source org
+    sql: "SELECT (SELECT sum(org_host_count) FROM t) - (SELECT count(*) FROM read_parquet('data/silver/hosts.parquet') WHERE identity_source = 'org')"
+  - name: cross-file, sum(cert_o_host_count) equals hosts rows with identity_source cert_o
+    sql: "SELECT (SELECT sum(cert_o_host_count) FROM t) - (SELECT count(*) FROM read_parquet('data/silver/hosts.parquet') WHERE identity_source = 'cert_o')"
+  - name: resolved share (sum(host_count) / hosts rows) inside 5% to 20% (D4 range; measured 13.62%)
+    sql: "SELECT CASE WHEN 100.0 * (SELECT sum(host_count) FROM t) / (SELECT count(*) FROM read_parquet('data/silver/hosts.parquet')) BETWEEN 5 AND 20 THEN 0 ELSE 1 END"
