@@ -1,0 +1,12 @@
+{
+  "$comment": "Strict JSON the adjudication prompt must return. llm/client.py validates against this; one retry, then decision = needs_human.",
+  "type": "object",
+  "required": ["decision", "confidence", "why"],
+  "additionalProperties": false,
+  "properties": {
+    "decision": {"enum": ["contact", "skip"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "why": {"type": "string", "maxLength": 300,
+            "description": "Plain English a salesperson can read; cite specific signals from the input only."}
+  }
+}

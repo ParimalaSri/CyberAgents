@@ -1,0 +1,18 @@
+# One phrase per line, matched case-insensitively. Lines starting with # are comments.
+# Fear-mongering and unsupported claims
+you have been breached
+you've been breached
+you were hacked
+hackers are
+critical vulnerability in your
+before it's too late
+# Spam-style openers
+i hope this email finds you well
+i hope this finds you well
+dear sir
+act now
+limited time
+guaranteed
+# Over-claiming
+100% secure
+completely secure

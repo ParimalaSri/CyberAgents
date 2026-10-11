@@ -1,0 +1,24 @@
+# Copy to context/contracts/<layer>.yml and edit. All paths are relative to the project root.
+# Types are matched by prefix against DuckDB types (VARCHAR, BIGINT, DOUBLE, TIMESTAMP, ...).
+layer: companies
+path: data/silver/companies.parquet
+key: company_id                      # string, or a list for composite keys
+
+row_rule:                            # row count relation to another file
+  other: data/silver/hosts.parquet
+  op: "<="                           # one of <=, ==, >=
+
+columns:
+  company_id: {type: VARCHAR, nullable: false}
+  company_name: {type: VARCHAR, nullable: false}
+  host_count: {type: BIGINT, nullable: false, min: 1}
+  unresolved_pct: {type: DOUBLE, min: 0, max: 100}
+
+denylist:                            # cloud/CDN/ISP names must never be companies
+  column: company_name
+  file: context/denylist.txt         # one lowercase name per line, # for comments
+
+checks:                              # custom SQL on the view `t`; must return one number
+  - name: no empty company names
+    sql: "SELECT count(*) FROM t WHERE trim(company_name) = ''"
+    expect: 0
