@@ -198,7 +198,7 @@ def d6_gate_cases():
     out.append(len({(str(k), k.scope, k.mode) for k in rules["keywords"]}) == len(rules["keywords"]))
     named = {
         "RackNerd LLC": "racknerd", "NTT America, Inc.": "ntt america", "IONOS Inc.": "ionos", "Telstra Limited": "telstra", "Vodafone Deutschland GmbH": "vodafone",
-        "Fastweb SpA": "fastweb", "Uninet S.A. de C.V.": "uninet", "CLIENTE ANTEL URUGUAY": "cliente antel", "Web.com Group, Inc.": "web com",
+        "Fastweb SpA": "fastweb", "Uninet S.A. de C.V.": "uninet", "CLIENTE ANTEL URUGUAY": "cliente antel", "Administracion Nacional de Telecomunicaciones": "administracion nacional de telecomunicaciones", "Web.com Group, Inc.": "web com",
         "PSINet, Inc.": "psinet", "Comcast IP Services, L.L.C.": "comcast", "CloudFly Net Inc": "cloudfly",
     }
     for name, family in named.items():

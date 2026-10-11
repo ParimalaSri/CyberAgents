@@ -62,7 +62,7 @@ netcup
 rackspace
 exoscale
 
-# --- named network operators / hosting providers, D6.7 (d); each family has >= 20 rows in the spread sample; gate 38/39 = 97.4% (outputs/denylist_cleanup_review.md section 8) ---
+# --- named network operators / hosting providers, D6.7 (d); each family has >= 20 rows in the spread sample; gate 39/40 = 97.5% (outputs/denylist_cleanup_review.md section 8) ---
 racknerd
 ntt america
 ionos
@@ -71,6 +71,7 @@ vodafone
 fastweb
 uninet
 cliente antel
+administracion nacional de telecomunicaciones
 web com
 psinet
 comcast
