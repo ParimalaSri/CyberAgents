@@ -1,0 +1,13 @@
+# Every change needs the owner's review. Agents recommend; the owner merges.
+* @ParimalaSri
+
+# Guardrails and governance: always the owner
+/.claude/hooks/ @ParimalaSri
+/.claude/settings.json @ParimalaSri
+/CLAUDE.md @ParimalaSri
+/.github/ @ParimalaSri
+
+# LLM layer, prompts and labels
+/llm/ @ParimalaSri
+/prompts/ @ParimalaSri
+/evals/labeled.jsonl @ParimalaSri
