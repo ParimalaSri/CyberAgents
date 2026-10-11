@@ -1,6 +1,7 @@
 """Smoke-test a Streamlit app headlessly: it must run without exceptions and render content."""
 import argparse
 import sys
+from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
@@ -14,7 +15,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     args = parser.parse_args()
 
-    app = AppTest.from_file(args.app, default_timeout=args.timeout).run()
+    app = AppTest.from_file(str(Path(args.app).resolve()), default_timeout=args.timeout).run()
     print(f"app: {args.app}")
     print(f"titles={len(app.title)} dataframes={len(app.dataframe)} "
           f"selectboxes={len(app.selectbox)} sliders={len(app.slider)} buttons={len(app.button)}")
