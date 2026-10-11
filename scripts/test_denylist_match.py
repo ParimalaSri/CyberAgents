@@ -224,6 +224,18 @@ def d7_cache_operator_cases():
     return out
 
 
+def d8_huawei_cases():
+    """Return assertions for the D8.2 huawei prefix: three Huawei group names match, a Brazilian owner string and a non-word-boundary near miss do not."""
+    rules = dm.load_rules()
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = []
+    for name in ["Huawei International Co., Limited", "Huawei Clouds Chile", "Huawei Software Technologies Co., Ltd."]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    for name in ["Owner: HUAWEI DO BRASIL", "Huaweix Foods"]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) is None)
+    return out
+
+
 def run_tests():
     """Run all matcher cases and return how many passed."""
     kw = ["hosting", "vpn", "internet service provider", "chinanet"]
@@ -284,6 +296,7 @@ def run_tests():
     cases.extend(d6_cert_cases())
     cases.extend(d6_gate_cases())
     cases.extend(d7_cache_operator_cases())
+    cases.extend(d8_huawei_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)

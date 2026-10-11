@@ -20,6 +20,8 @@ aliyun
 tencent
 huawei cloud
 huawei public cloud
+# D8.2: huawei family completion (existing entries covered only some Huawei names); gate in outputs/denylist_cleanup_review.md section 9.
+huawei
 oracle
 ibm cloud
 softlayer

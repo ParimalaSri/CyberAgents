@@ -235,3 +235,23 @@ name outside Mexico), NTT America, Telstra and Comcast (operators that also sell
 Not verified: names only, one reviewer, UNSURE counted REAL, no external lookup; 100K sample only, not the full file; the full-file residual of the operator long tail is not measured; the compound rule is gated on
 30 orgs; the (d) prefixes are an explicit hand list and do not scale; the gate (a) call rests on 4 orgs and a names-only reading. The shared matcher is applied by `check_contract.py` (RAW-010 closed), so
 the new rules are enforced for names, but a contract cannot catch an unlisted name.
+
+## 9. D8.2 `huawei` prefix (family completion)
+Rule added to `context/denylist_prefixes.txt`: `huawei` (word-boundary prefix on the normalised org). The existing `huawei cloud`, `huawei public cloud` and one exact entry covered only some Huawei names.
+Gate, run on `data/silver/hosts.parquet` (97,758 rows, org text only): 8 distinct org names newly matched among rows that survive today, 47 rows. Names only, UNSURE counted REAL:
+| org | rows | reading |
+|---|---|---|
+| HUAWEI INTERNATIONAL PTE. LTD. | 34 | Huawei group entity (UNSURE as an operator; it is the group, not a named cloud) |
+| Huawei Clouds Chile | 5 | Huawei cloud region |
+| Huawei South Africa Clouds | 2 | Huawei cloud region |
+| Huawei Singapore Clouds | 2 | Huawei cloud region |
+| Huawei Mexico Clouds | 1 | Huawei cloud region |
+| Huawei Clouds HongKong | 1 | Huawei cloud region |
+| Huawei HongKong Clouds | 1 | Huawei cloud region |
+| Huawei Software Technologies Ltd.Co | 1 | Huawei group entity (the cloud operator) |
+Result: 8 of 8 are Huawei group entities, which confirms the senior's measurement. 7 of 8 (13 rows) are named clouds; the 34-row HUAWEI INTERNATIONAL name is a group entity rather than a cloud, so counting it strictly as
+UNSURE the strict INFRA share is 7 of 8 names (87.5%), 13 of 47 rows. Exclusion of the whole group is the D8.2 decision, not an outcome of the 90% gate. No false positive of another company: no non-Huawei name starts with the word.
+`Owner: HUAWEI DO BRASIL TELECOMUNICACOES LTDA Address: ...` (4 rows, surviving): normalised it starts with `owner`, so the word-boundary prefix does not match and it stays `identity_source = 'org'`.
+`Huaweix Foods` (made-up) is not matched either. Pinned in `scripts/test_denylist_match.py` (`d8_huawei_cases`, 217 cases pass).
+Effect on the stage output (matcher recomputed, stage not rerun): 47 rows change status; `org` 12,804 to 12,757; `infrastructure_unresolved` 83,064 to 83,111; infrastructure rows 84,696 to 84,743 (86.64% to 86.69% of 97,758);
+resolved share (org plus cert_o over all hosts rows) 13.67% to 13.62%.

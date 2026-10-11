@@ -151,6 +151,10 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   prefixes (gate (a) in `outputs/denylist_cleanup_review.md` 8.2 superseded by D7.1; hostname evidence Netflix 143/143 on nflxvideo.net, Meta and Facebook 27/27 on facebook.com or fbcdn.net;
   Apple Inc. not excluded). Matcher on `data/silver/hosts.parquet` (97,758 rows): 173 rows change status, infrastructure 84,523 to 84,696 (86.46% to 86.64%). Not added: True Internet, Taiwan Fixed
   Network, Leaseweb and the other residual names (accepted long tail, D7.2). 212 tests pass.
+- Update 2026-10-11, D8.2 (branch `feat/data-integrator/d8-huawei`, proposed; decided by senior-data-engineer): `huawei` added as an org prefix (family completion; no other names added).
+  Gate on `data/silver/hosts.parquet` (97,758 rows): 8 distinct names newly matched, 47 surviving rows, all Huawei group entities by name (HUAWEI INTERNATIONAL PTE. LTD. 34, Huawei Clouds Chile 5, others 8).
+  `Owner: HUAWEI DO BRASIL ...` (4 rows) is not matched (normalised name starts with `owner`). Not added: TIM S/A, Host-Unlimited, True Internet, Taiwan Fixed Network. Details: `outputs/denylist_cleanup_review.md` section 9.
+  Expected after the stage rerun: org 12,757, infrastructure_unresolved 83,111, resolved share (org plus cert_o) 13.62%. 217 matcher cases and 16 stage tests pass.
 
 ## RAW-014 Expectations in D3/section 10 not reproduced on the spread sample
 - Symptom: port 12304 is 0.22% (expected about 2%); infrastructure share 87.63% (expected about 86%); surviving 12.34% (expected about 10%).
