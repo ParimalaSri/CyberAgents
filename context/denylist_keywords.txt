@@ -1,0 +1,20 @@
+# CyberIntel denylist KEYWORDS (PROPOSED, not approved). Decisions D2 and D4 in docs/ARCHITECTURE.md section 15; RAW-013.
+# Rule: a keyword matches when its words appear as a whole-word (word-sequence) run anywhere in the NORMALISED org name or the
+# NORMALISED isp name (scripts/denylist_match.py normalise() then matches_keyword()). It is NOT an arbitrary substring match:
+# "hosting" matches "Krystal Hosting Ltd" but not "webhosting"; "vpn" does not match "vpnsoft".
+# This file lists ONLY keywords that PASSED the precision gate: at least 90% of up to 50 reviewed newly-excluded distinct orgs
+# classified INFRA (ISP, telecom, hosting, VPN, data centre, network provider) from the org name text alone, UNSURE counted as REAL.
+# Gate figures and the keywords that failed are in outputs/denylist_keyword_review.md. Re-run the gate before adding a keyword.
+# Gate results (INFRA / reviewed): chinanet 45/50, hosting 47/50, vpn 4/4, internet service provider 15/15, broadband 47/50,
+# web hosting 8/8, vps 9/9, telecommunications 46/50, cable 46/50, fibre 10/11, dedicated 20/22.
+chinanet
+hosting
+vpn
+internet service provider
+broadband
+web hosting
+vps
+telecommunications
+cable
+fibre
+dedicated

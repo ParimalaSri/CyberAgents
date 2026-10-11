@@ -1,4 +1,4 @@
-"""Reference matcher for the denylist files in context/ (normaliser, exact, prefix, pattern, cert defaults)."""
+"""Reference matcher for the denylist files in context/ (normaliser, exact, prefix, pattern, keyword, cert defaults)."""
 import fnmatch
 import ipaddress
 import re
@@ -44,6 +44,16 @@ def load_prefixes(path=None):
     return result
 
 
+def load_keywords(path=None):
+    """Return normalised keyword phrases (whole-word match rules), de-duplicated in file order."""
+    result = []
+    for entry in read_entries(path or CONTEXT_DIR / "denylist_keywords.txt"):
+        phrase = normalise(entry)
+        if phrase and phrase not in result:
+            result.append(phrase)
+    return result
+
+
 def load_cert_defaults(path=None):
     """Return the set of normalised default certificate organisation names."""
     return {normalise(e) for e in read_entries(path or CONTEXT_DIR / "cert_default_names.txt")}
@@ -54,6 +64,15 @@ def matches_prefix(normalised, prefixes):
     for prefix in prefixes:
         if normalised == prefix or normalised.startswith(prefix + " "):
             return prefix
+    return None
+
+
+def matches_keyword(normalised, keywords):
+    """Return the first keyword whose words appear as a whole-word run in the normalised text, else None."""
+    padded = " " + normalised + " "
+    for keyword in keywords:
+        if " " + keyword + " " in padded:
+            return keyword
     return None
 
 

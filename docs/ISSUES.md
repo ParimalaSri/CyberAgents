@@ -89,14 +89,22 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Contract rule: company names must not parse as an IP/CIDR (add to companies contract).
 
 ## RAW-013 List-based denylist still leaks ISPs and hosting on the long tail
-- Symptom: after exact + prefix + pattern + D4 tag rules, 12,336 rows survive (12.34%); a keyword scan of org text
+- Status: PARTLY FIXED on branch `feat/data-integrator/isp-keywords` (proposed, owner approval pending). Keyword gate run on 2026-10-11.
+- Symptom: after exact + prefix + pattern + D4 tag rules, 12,368 rows survive (12.37%; the profile printed 12,336); a keyword scan of org text
   (telecom, telekom, telefon, broadband, internet service, chinanet, communications, mobile, cable, vpn, hosting, weebly, cloud, server)
-  matches 2,778 of them (22.5%). Examples: Internet Service Provider 65, Weebly 49, Mullvad VPN 35, Bretagne Telecom 29,
+  matched 2,778 of them. Examples: Internet Service Provider 65, Weebly 49, Mullvad VPN 35, Bretagne Telecom 29,
   CHINANET jiangsu province network 27, EGIHosting 20, WHG Hosting Services 20.
 - Root cause: ISP/hosting names outside the hand-picked list; `cloud.provider` and `cloud`/`cdn` tags add only 6 rows beyond the lists.
-- Fix idea: owner decides on keyword families (telecom, telekom, chinanet, hosting, vpn) and on D2 treatment of Weebly. The keyword scan is a
-  heuristic and was not hand-verified, so some matches may be real companies. Not applied (no unapproved list changes).
-- Contract rule: companies row share outside 5-20% flagged (already planned); add a keyword-leakage warning.
+- Fix applied (proposed): `context/denylist_keywords.txt` with 11 whole-word keywords that passed a hand-review gate (>= 90% INFRA of up to 50 orgs):
+  chinanet, hosting, vpn, internet service provider, broadband, web hosting, vps, telecommunications, cable, fibre, dedicated. `weebly` and `jimdo` added
+  to the prefix list (D2). Effect on the spread sample: infrastructure 87.63% to 88.80%, surviving 12.37% to 11.20%, surviving distinct orgs 5,519 to 5,113,
+  1,170 rows newly excluded. Details: `outputs/denylist_keyword_review.md`.
+- What remains: (1) 18 candidates failed the gate and are not applied, including telecom (84.0%), telekom (54.0%), communications (78.0%), isp, idc, fiber,
+  mobile, cloud, internet, network. Their REAL examples are mostly real customers behind a telecom carrier matched via the isp text; an org-only scope might
+  pass but needs a code change and its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr
+  (49 rows) not added: owner to say whether WordPress.com counts as a website builder. (4) The rules are not enforced anywhere yet: `check_contract.py` still
+  understands only the exact list (RAW-010) and does not apply prefix, pattern or keyword rules. (5) Not yet run on the full file.
+- Contract rule: companies row share outside 5-20% flagged (already planned); keyword-leakage check once `check_contract.py` calls `matches_keyword`.
 
 ## RAW-014 Expectations in D3/section 10 not reproduced on the spread sample
 - Symptom: port 12304 is 0.22% (expected about 2%); infrastructure share 87.63% (expected about 86%); surviving 12.34% (expected about 10%).
