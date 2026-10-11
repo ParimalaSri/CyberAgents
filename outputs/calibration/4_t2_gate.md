@@ -49,7 +49,7 @@ Branches of the T2 regex, assigned in the order stem, then suffix (telecom, host
 
 ## T1 check, fresh seed 23, 20 of 1,046 (D8.2)
 Operators: Student City Prepaid Internet, shost-cloud, PERN-Pakistan Education & Research Network, Shenzhen Qianhai bird cloud computing, CIA DE TELECOMUNICACOES DO BRASIL CENTRAL, PingPipe Internet Corporation, Scala Data Centers, Oneprovider.com - Lagos Infrastructure, Giganet Internet, Century Communications - CableHigh Speed Data Division, Planeetta Internet Oy, Padi Internet PT, Servers Australia Pty Ltd (13). Unsure: BEST INTERNET SOLUTION XK, Midcontinent Communications, BG-NETWORK, Brinkster Communications Corporation, BENCHMARK INTERNET GROUP, Evolving Networks Limited, Genious Communications (7). Organisation: 0.
-Result: OPERATOR 13 / 20 = 65% strict; operator or unsure 20 / 20; 0 real organisations. There is no D9 bar for T1 at 32/40 scale; D8.2 reported the earlier seed read 9 of 20 operators. 65% is higher than that, and the flag has no false positive here (the unsure names are `communications`, `network`, `internet` names that the D7.2 gate already said cannot pass 90% strict; kept as a cap for that reason).
+Result: OPERATOR 13 / 20 = 65% strict; operator or unsure 20 / 20; 0 real organisations. No numeric bar is stated for T1 in D9. (The D8.2 figure of 9 of 20 operators was a random draw of single-row names, not of T1-flagged names, so it is not comparable.) The flag has no false positive in this draw; the unsure names are `communications`, `network` and `internet` names, which the D7.2 gate said cannot pass 90% strict on their own (kept as a cap for that reason).
 
 ## Verdict
 - **T2 as written does NOT pass the gate** (23 of 40 strict; bar 32).
