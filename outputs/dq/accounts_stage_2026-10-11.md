@@ -94,7 +94,8 @@ Accounts scoring above 0: contact 1,324 (22.87%), urgency 1,324 (22.87%), fit 1,
 
 ### Review cut (N = 200, floor 20)
 
-The cut falls at contact_score 30: 142 non-excluded accounts are tied at 30, 7 are kept in review and 135 go to skip (tie broken by urgency_score, host_count, account_id; D11 measured score 34 with a tie of 22 before the territory change). Accounts above the cut score: 193.
+The cut falls at contact_score 30: 142 non-excluded accounts are tied at 30, 7 are kept in review and 135 go to skip (tie broken by urgency_score, operator_name_shape (false first), kev_host_count, host_count, account_id; D12.1 measured score 30 with a tie of 142 on the D11 output). Accounts above the cut score: 193.
+Kept at the cut: Alta Gracia Project Holding Ltd (unflagged, 3 hosts, 3 KEV hosts); Provider Ktechnology (unflagged, 2 hosts, 2 KEV hosts); Brainoza OU (unflagged, singleton, 1 KEV hosts); SugarHosts (unflagged, singleton, 1 KEV hosts); Seiko Electric Co.,Ltd. (unflagged, singleton, 1 KEV hosts); Free Way Tecnologia (unflagged, singleton, 1 KEV hosts); Owl Limited (unflagged, singleton, 1 KEV hosts). D12.1 simulation: Alta Gracia Project Holding, Provider Ktechnology, Brainoza OU, SugarHosts, Seiko Electric, Free Way Tecnologia, Owl Limited (0 flagged, 5 singletons).
 
 ### Threshold previews (every would-be contact is held in review by operator_unverified; the top-N rule applies at each pair)
 
@@ -124,57 +125,60 @@ By exact reason set: operator_unverified = 46; operator_name_shape,operator_unve
 | total | 200 |
 | reached by a cap (was contact) | 51 |
 | reached by the top-N rule alone | 149 |
-| singletons | 22 |
-| operator-shaped (T1 or T2) | 42 |
-| operator-shaped among the top-N-only rows (get the D11.3 clause) | 37 |
+| singletons | 27 |
+| operator-shaped (T1 or T2) | 35 |
+| operator-shaped among the top-N-only rows (get the D11.3 clause) | 30 |
 | low identity confidence | 8 |
-| country US | 48 |
+| country US | 46 |
 
 Exclude band (D9.3 rule, noise_host_count >= 2 AND noise_host_share >= 0.5): 1 account(s): SC Lithuanian Radio and TV Center (2 hosts, 3 noise rows, share 0.60).
 
-Skip accounts with urgency_score above 0, split at the floor Y = 20 (all read "Below the review cut-off." and none is routed to review, D11.3):
+Skip accounts with urgency_score above 0, split at the floor Y = 20 (none is routed to review, D11.3; the clause is "Below the review cut-off.", or "Ranked below this run's review list; a rank, not a judgement of risk." where a KEV or CVSS sentence is kept, D12.2):
 
 | where | skip accounts urgency > 0 | non-SSH admin or database port | CVSS 7.0 or more | both | union |
 |---|---|---|---|---|---|
 | contact_score below 20 (D11.3 measured 659, 42, 32, 0, 74) | 659 | 42 | 32 | 0 | 74 |
 | contact_score 20 or more, beyond the top-N cut | 464 | 9 | 441 | 0 | 450 |
 
+Skip rows ending with the D12.2 clause: 537 (KEV 303, CVSS 234; at or above the floor 455, below 82); D12 expected 537 = 303 + 234, 455 and 82. Skip rows with the plain clause: 586.
+Accounts whose why carries the D12.3 exposure phrase: 40 (D12 expected 45). Longest why in words: skip 33, all rows 40 (limit 40).
+
 ### Effect of the union penalty (D10) versus the previous T1-only penalty
 
 Accounts whose fit_score fell because the penalty now covers T2-only names: 66 (total 1,160 fit points, mean 17.6 per changed account, max 30); accounts whose contact_score changed: 29.
 Of the previous top 25 by contact_score, 3 are no longer in the top 25.
 Of the previous top 50 by contact_score, 2 are no longer in the top 50.
-Accounts with a different overall rank: 644; largest rank shift among accounts in either top 25: 69.
+Accounts with a different overall rank: 734; largest rank shift among accounts in either top 25: 74.
 
 ## 4. Top 25 accounts by contact_score
 
 | company | cc | hosts | fit | urgency | contact | band | cap_reasons | T1 | T2 | why |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Beijing Jingdong 360 Degree E-commerce Co., Ltd. | CN | 8 | 50 | 90 | 68 | review | operator_unverified | False | False | 2 hosts running software whose version matches the CISA known-exploited list; an exposed admin or database service (SSH 22, MongoDB 27017) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
+| Beijing Jingdong 360 Degree E-commerce Co., Ltd. | CN | 8 | 50 | 90 | 68 | review | operator_unverified | False | False | 2 hosts running software whose version matches the CISA known-exploited list. Not yet checked that this is an end-user organisation, not a network operator. |
 | Strato Rechenzentrum, Berlin | DE | 15 | 20 | 100 | 60 | review | operator_name_shape,operator_unverified | False | True | 1 host running software whose version matches the CISA known-exploited list. Name looks like a network operator. Not yet checked that this is an end-user organisation, not a network operator. |
-| Leaseweb Deutschland GmbH | DE | 6 | 30 | 90 | 59 | review | operator_unverified | False | False | 2 hosts running software whose version matches the CISA known-exploited list; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
+| Leaseweb Deutschland GmbH | DE | 6 | 30 | 90 | 59 | review | operator_unverified | False | False | 2 hosts running software whose version matches the CISA known-exploited list. Not yet checked that this is an end-user organisation, not a network operator. |
 | Aruba S.p.A. - Cloud Services Farm2 | IT | 11 | 20 | 95 | 57 | review | operator_name_shape,operator_unverified | True | True | 3 hosts running software whose version matches the CISA known-exploited list. Name looks like a network operator. Not yet checked that this is an end-user organisation, not a network operator. |
 | NCR Corporation | US | 24 | 45 | 75 | 54 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; 24 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
-| Wowrack.com | US | 2 | 15 | 90 | 52 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| Telia Eesti AS | EE | 13 | 30 | 80 | 52 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| Beijing Volcano Engine Technology Co., Ltd. | CN | 11 | 30 | 80 | 52 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
+| Wowrack.com | US | 2 | 15 | 90 | 52 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list. Not yet checked that this is an end-user organisation, not a network operator. |
+| Telia Eesti AS | EE | 13 | 30 | 80 | 52 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| Beijing Volcano Engine Technology Co., Ltd. | CN | 11 | 30 | 80 | 52 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
 | SOLLUTIUM EU Sp z.o.o. | UA | 5 | 35 | 75 | 51 | review | operator_unverified | False | False | 2 hosts running software whose version matches the CISA known-exploited list; database, medical or IoT systems in the stack. Not yet checked that this is an end-user organisation, not a network operator. |
 | Office of Info.Tech. Admin. for Educational Development | TH | 26 | 45 | 70 | 51 | review | operator_unverified | False | False | 2 hosts running software whose version matches the CISA known-exploited list; 26 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
-| Fastmos Co Limited | HK | 5 | 35 | 70 | 47 | review | operator_unverified | False | False | An exposed admin or database service (MySQL 3306) on outdated software; worst version-matched vulnerability scores CVSS 7.2. Not yet checked that this is an end-user organisation, not a network operator. |
-| ANX Holding GmbH | DE | 2 | 35 | 70 | 47 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (MongoDB 27017) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| HEWLETT PACKARD ENTERPRISE COMPANY | US | 4 | 15 | 80 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| Integen, Inc | HK | 3 | 15 | 80 | 46 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; an exposed admin or database service (SMB 445) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| FEDERAL ONLINE GROUP LLC | HK | 3 | 15 | 80 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 10.0; an exposed admin or database service (SMB 445) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| OPTAGE Inc. | JP | 19 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| xTom GmbH | DE | 16 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| Digital Core Technology Co., Limited | HK | 15 | 30 | 70 | 46 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; 15 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
+| Fastmos Co Limited | HK | 5 | 35 | 70 | 47 | review | operator_unverified | False | False | An exposed admin or database service (MySQL 3306) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability; worst version-matched vulnerability scores CVSS 7.2. Not yet checked that this is an end-user organisation, not a network operator. |
+| ANX Holding GmbH | DE | 2 | 35 | 70 | 47 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (MongoDB 27017) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| Integen, Inc | HK | 3 | 15 | 80 | 46 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list. Not yet checked that this is an end-user organisation, not a network operator. |
+| HEWLETT PACKARD ENTERPRISE COMPANY | US | 4 | 15 | 80 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| FEDERAL ONLINE GROUP LLC | HK | 3 | 15 | 80 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 10.0; an exposed admin or database service (SMB 445) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
 | TimeWeb Ltd. | RU | 11 | 30 | 70 | 46 | review | operator_unverified | False | False | 3 hosts running software whose version matches the CISA known-exploited list; 11 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
-| Eonix Corporation | US | 10 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| TT DOTCOM SDN BHD | MY | 8 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on outdated software. Not yet checked that this is an end-user organisation, not a network operator. |
-| LIWEST Kabelmedien GmbH | AT | 3 | 35 | 65 | 44 | review | operator_unverified | False | False | An exposed admin or database service (MySQL 3306) on outdated software; worst version-matched vulnerability scores CVSS 7.5. Not yet checked that this is an end-user organisation, not a network operator. |
+| Digital Core Technology Co., Limited | HK | 15 | 30 | 70 | 46 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; 15 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
+| OPTAGE Inc. | JP | 19 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| xTom GmbH | DE | 16 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| Eonix Corporation | US | 10 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| TT DOTCOM SDN BHD | MY | 8 | 30 | 70 | 46 | review | operator_unverified | False | False | Worst version-matched vulnerability scores CVSS 9.8; an exposed admin or database service (SSH 22) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability. Not yet checked that this is an end-user organisation, not a network operator. |
+| LIWEST Kabelmedien GmbH | AT | 3 | 35 | 65 | 44 | review | operator_unverified | False | False | An exposed admin or database service (MySQL 3306) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability; worst version-matched vulnerability scores CVSS 7.5. Not yet checked that this is an end-user organisation, not a network operator. |
 | U.S. Marshals Service in accordance with the Final Order of Forfeiture | US | 5 | 15 | 75 | 43 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; remote-admin or database services exposed (RDP 3389). Not yet checked that this is an end-user organisation, not a network operator. |
 | Cellcom Fixed Line Communication L.P | IL | 4 | 15 | 75 | 43 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; remote-admin or database services exposed (Telnet 23). Not yet checked that this is an end-user organisation, not a network operator. |
-| Dattatec Corp | AR | 19 | 30 | 65 | 42 | review | operator_unverified | False | False | 1 host running software whose version matches the CISA known-exploited list; 19 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
+| Beget LLC | RU | 17 | 30 | 65 | 42 | review | operator_unverified | False | False | 7 hosts running software whose version matches the CISA known-exploited list; 17 IPs in the footprint. Not yet checked that this is an end-user organisation, not a network operator. |
 
 Of the top 25, 2 carry the operator-name flag (T1 or T2; T1 alone 1). A by-eye read of the names (not a rule, not acted on) follows in section 7.
 
@@ -211,25 +215,7 @@ Null rates (all columns, worst first):
 5 random rows:
 
 - [1] account_id=e3df186084237423, company_name=Strad Solutions, country_code=IN, host_count=2, identity_source=org, identity_confidence=high, fit_score=15, urgency_score=40, contact_score=23, top_signals=max_cvss_band,footprint_band, band_uncapped=review, cap_reasons=None, band=skip, why=Worst version-matched vulnerability scores CVSS 9.8; 2 IPs in the foot, decision=None, prompt_version=None, final_band=skip
-- [2] account_id=179d9e945ff271c2, company_name=Network Block is for the use of STPI-Bangalore, SOFTNET-IN, country_code=IN, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
-- [3] account_id=353e8bddd2c14749, company_name=EUserv Internet, country_code=DE, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
-- [4] account_id=5160becd2ac5a7b2, company_name=XFone 018 Ltd, country_code=IL, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
-- [5] account_id=8e3e58cb55205cef, company_name=Link Egypt, country_code=EG, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
-
-## 6. Verification run by the data-engineer after D11 (not a validation; data-quality-engineer validates)
-
-- `python scripts/verify_4_score.py --all` (independent plain-Python recompute written from D9, D10 and D11, own constants, no import of the stage): 5,790 companies checked, 0 disagreements; the default run (200 random with seed 2026, top 25, exclude rows) also 0; sort order holds. It recomputes fit with territory 0, the rank over non-excluded accounts in the stage order, band (would-be contacts kept, top N = 200 with floor 20), cap_reasons, top_signals, the skip clause, the operator clause on review rows, the KEV and CVSS phrases, and the absence of every pre-D11 phrase.
-- Unit tests: `python -m unittest scripts.test_1_clean scripts.test_2_companies scripts.test_3_signals scripts.test_4_score`: 93 tests, OK.
-- Every `why`: at most 37 words (limit 40), none with `=`, `_`, "located in", "Exposure is limited" or a breach word. Operator-shaped review rows: 42, all 42 end with "Name looks like a network operator." (5 through the cap clause, 37 through D11.3).
-- The report was regenerated by the stage; this section and sections 7 and 8 are hand-added.
-
-## 7. Top 25 read by eye (names only, one reviewer, not a rule, not acted on)
-
-Organisations (5): Beijing Jingdong 360 Degree E-commerce, NCR, Hewlett Packard Enterprise, U.S. Marshals Service, the Thai Office of Info.Tech. Admin. for Educational Development. Operators (14): Strato Rechenzentrum, Leaseweb, Aruba Cloud Services Farm2, Wowrack, Telia Eesti, Volcano Engine, OPTAGE, xTom, TimeWeb, Eonix, TT DOTCOM, LIWEST Kabelmedien, Cellcom Fixed Line, Dattatec. Unsure (6): SOLLUTIUM EU, Fastmos, ANX Holding, Integen, Federal Online Group, Digital Core Technology. The operator-name flag marks 2 of the 25 (Strato, Aruba). All 25 are `review` with `operator_unverified`; none is `contact`. The KEV and CVSS phrases now say "version matches" and "version-matched"; the exposure phrase "on outdated software" is unchanged by D11 and still states "outdated" without "version-matched" (flagged to the senior engineer, not changed).
-
-## 8. Differences from the previous run and from the senior's D11 expectation, and why
-
-- Bands: previous (D10) 0 / 664 / 5,125 / 1; this run 0 / 200 / 5,589 / 1 (contact / review / skip / exclude), as D11.2 expects (N = 200; 664 - 200 = 464 accounts moved from review to skip, which is the 464 accounts at contact_score 20 or more beyond the cut).
-- Would-be contacts: 51 (D11.5 expected about 51; was 107 with territory 35).
-- Cut: contact_score 30, 142 non-excluded accounts tied at 30, 7 kept, 135 to skip. D11.2 measured score 34 with a tie of 22 before the territory change; the cut score fell by 4 because territory points are now 0 (every in-territory account lost 35 fit points). The tie at the cut is much larger (142, not 22; the cause beyond the territory change was not investigated), so the 7 kept at 30 are chosen by urgency, host count and account id.
-- Skip with urgency above 0: 1,123 (659 below the floor, 464 at or above it beyond the cut). Below the floor the D11.3 figures reproduce exactly: 42 with a non-SSH admin or database port, 32 with CVSS 7.0 or more, overlap 0, union 74. The 464 beyond the cut hold 9 + 441 = 450 more such accounts (CVSS 7.0 or more is common among them); they read "Below the review cut-off." and are not routed (D11.3 item 2).
+- [2] account_id=3767dc982a2dcb11, company_name=TravelCenters of America, country_code=US, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
+- [3] account_id=574a43d708d700bc, company_name=VTC DIGICOM, country_code=VN, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
+- [4] account_id=76c2bd58c49d2427, company_name=GRIMALDI EUROMED S.P.A., country_code=IT, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
+- [5] account_id=c9f84654f194cad9, company_name=NeptunoMedia Inc., country_code=PR, host_count=1, identity_source=org, identity_confidence=high, fit_score=0, urgency_score=0, contact_score=0, top_signals=None, band_uncapped=skip, cap_reasons=None, band=skip, why=No exposure signal found in the scan (1 host seen)., decision=None, prompt_version=None, final_band=skip
