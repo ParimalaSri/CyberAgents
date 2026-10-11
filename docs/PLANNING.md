@@ -15,7 +15,7 @@ read a methodology, decode a score, or trust a list that cannot explain itself.
 | 2 | **Explain each account in plain English** (`why`) | A score nobody can explain is not used. The `why` is built from the same signals as the score, so it is always true to the data. |
 | 3 | **Draft the first touch** for top accounts | It answers "how do we reach them first". It is the best-fit use of a writing model, and the draft is grounded in the account's own signals. |
 | 4 | **Judge the ambiguous middle with an LLM** (review band only) | Rules handle clear cases cheaply. The middle needs judgement. It is also the one place where evals, tracing and cost control can be shown on a small, defensible volume. |
-| 5 | **Show what the data cannot say** (share of unattributable infrastructure, unresolved rate) | Trust. About 87% to 90% of scan rows in the head sample belong to cloud, CDN and hosting owners, not customers. Saying so openly is part of the product. |
+| 5 | **Show what the data cannot say** (share of unattributable infrastructure, unresolved rate) | Trust. About 87% to 90% of scan rows in the head sample belong to cloud, CDN and hosting owners, not customers (measured on the spread sample at stage 2: 86.38% of rows cannot be attributed to a customer, 13.62% can). Saying so openly is part of the product. |
 
 Why not other ideas: a market map, a technology-stack search tool and a generic alerting feed are filters on the
 dataset, not decisions for a rep. Contact discovery and CRM sync are out of reach of this data (below).
