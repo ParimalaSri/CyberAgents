@@ -31,11 +31,12 @@ CVSS_CRITICAL = 9.0  # max_cvss_band 3
 FOOTPRINT_CAP = 50
 FOOTPRINT_EDGES = (1, 5, 20)  # distinct_host_ips: 1 -> band 0; 2-5 -> 1; 6-20 -> 2; above 20 -> 3
 TERRITORY_COUNTRIES = ("US",)  # PROVISIONAL PLACEHOLDER (D9.4 column 14): the owner supplies the real territory list; not a business decision
-# D9.5: DuckDB (RE2) patterns applied to name_norm, copied character for character from the decision record.
+# D9.5 / D11.1: DuckDB (RE2) patterns applied to name_norm, copied character for character from the decision record. T2 drops the `net` suffix
+# branch (D11.1: 5 of 22 operators at seed 23, the branch is excluded from the flag and kept in no column); PROVISIONAL, owner approval pending.
 OPERATOR_T1_REGEX = (r"(^| )(internet|telekom|communications|hosting|hosted|servers?|broadband|cable|mobile|idc|infrastructure|research"
                      r"|telecom[a-z0-9]*|comunica[a-z0-9]*|network[a-z0-9]*)( |$)|data center|fixed network|(cloud|hosting)( |$)")
 OPERATOR_T2_REGEX = (r"(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)"
-                     r"|[a-z0-9]+(telecom|host|hosting|net|servers?)( |$)")
+                     r"|[a-z0-9]+(telecom|host|hosting|servers?)( |$)")
 TOP_URGENCY = 15
 SPARSE_SHARE = 1.0  # percent: coverage below this is flagged
 DENSE_SHARE = 50.0  # percent: coverage above this is flagged
@@ -58,14 +59,15 @@ OUTPUT_COLUMNS = CARRIED_COLUMNS + SIGNAL_COLUMNS
 KEY_COLUMNS = tuple(name for name, _ in OUTPUT_COLUMNS)
 BOOLEAN_SIGNALS = tuple(name for name, typ in OUTPUT_COLUMNS if typ == "BOOLEAN")
 URGENCY_SIGNALS = ("kev_exposed", "cert_expired_or_soon", "eol_stack", "legacy_tls", "risky_service_exposed", "exposed_and_outdated")
-# D9.4 coverage table (ad hoc queries by the senior engineer): label -> (companies, share percent). Compared with measured values in the report.
+# D9.4 coverage table (ad hoc queries by the senior engineer) as amended by D11.1 (T2-only 392 -> 202, union 1,438 -> about 1,248; T1 1,046 unchanged).
+# Compared with measured values in the report; the old D9 expectation was T1 1,046 / T2-only 392 / union 1,438.
 D9_COVERAGE = {
-    "in_territory": 1346, "named_registrant": 5387, "sensitive_stack": 55, "operator_shape_t1": 1046, "operator_name_shape": 1438,
+    "in_territory": 1346, "named_registrant": 5387, "sensitive_stack": 55, "operator_shape_t1": 1046, "operator_name_shape": 1248,
     "is_singleton": 4169, "host_signals_blind": 180, "kev_exposed": 462, "cert_expired_or_soon": 373, "eol_stack": 352, "legacy_tls": 209,
     "risky_service_exposed": 226, "risky_non_ssh_exposed": 68, "exposed_and_outdated": 48,
 }
 D9_SPECIAL = {"max_cvss_band = 3": 460, "max_cvss_band = 2": 209, "max_cvss_band = 1": 70, "footprint_band = 1": 1215, "footprint_band = 2": 318,
-              "footprint_band = 3": 27, "T2 only (T2 and not T1)": 392, "risky_service_exposed SSH only": 158,
+              "footprint_band = 3": 27, "T2 only (T2 and not T1)": 202, "risky_service_exposed SSH only": 158,
               "any urgency signal": 1294, "strong urgency": 662}
 
 
@@ -246,7 +248,7 @@ def section_coverage(con, rep, total):
     any_cvss = con.execute("SELECT count(*) FROM signals WHERE max_cvss_band >= 1").fetchone()[0]
     rep.add(f"\nCompanies with any CVSS value: {any_cvss:,} (D9.4: 739). footprint_band 0 (one IP): "
             f"{con.execute('SELECT count(*) FROM signals WHERE footprint_band = 0').fetchone()[0]:,} (D9.4: 4,230). "
-            f"in_territory is a PLACEHOLDER ({', '.join(TERRITORY_COUNTRIES)} only) until the owner supplies the territory list; T2 is computed, not yet part of any penalty.")
+            f"in_territory is a PLACEHOLDER ({', '.join(TERRITORY_COUNTRIES)} only) until the owner supplies the territory list; T2 is the D11.1 pattern (no `net` suffix branch).")
     nulls = con.execute("SELECT count(*) FROM signals WHERE in_territory IS NULL").fetchone()[0]
     rep.add(f"in_territory null (country_code null): {nulls:,}.")
     rep.add("\n## 3. Counted-host reconciliation (D6.4)\n")

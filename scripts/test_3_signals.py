@@ -220,8 +220,8 @@ class SignalStageTests(unittest.TestCase):
         """T1 and T2 flag the named operator shapes and the union column equals T1 or T2."""
         t1_names = ["acme hosting", "big telecom", "telekom austria", "network solutions", "my data center inc", "foo cloud", "internet services",
                     "dedicated servers", "broadband one", "comunicaciones sa", "fixed network ltd", "xyz idc", "cable one", "hosted by foo"]
-        t2_names = ["cloudradium", "hostpoint", "datacenter gmbh", "strato rechenzentrum", "omni fiber", "my isp", "colo space", "vps shop",
-                    "kazakhtelecom", "viking host", "newsnet ag", "megaservers", "rackhost zrt"]
+        t2_names = ["cloudradium", "hostpoint", "datacenter gmbh", "strato rechenzentrum", "omni fiber", "omni fibre", "my isp", "colo space", "vps shop",
+                    "dedicated line co", "xxxtelecom", "xxxhost", "xxxhosting", "xxxserver", "xxxservers", "rackhost zrt", "sibirtelecom", "cloud9 ltd"]
         rows, _, _ = run_signals([host(n) for n in t1_names + t2_names])
         for n in t1_names:
             self.assertTrue(rows[n]["operator_shape_t1"], n)
@@ -236,7 +236,8 @@ class SignalStageTests(unittest.TestCase):
     def test_operator_regexes_negative(self):
         """Near-miss names are not flagged by either regex."""
         names = ["kent state university", "autozone", "salesforce", "bank of testing", "rooster", "acme", "colorado university",
-                 "reverse", "retail group", "oil and gas", "gerondata"]
+                 "reverse", "retail group", "oil and gas", "gerondata", "bellnet", "newsnet ag",
+                 "ente nazionale ellenico per il turismo public subnet", "planet", "magnet corp", "internetx", "cabinet"]
         rows, _, _ = run_signals([host(n) for n in names])
         for n in names:
             self.assertFalse(rows[n]["operator_shape_t1"], n)
@@ -244,13 +245,14 @@ class SignalStageTests(unittest.TestCase):
             self.assertFalse(rows[n]["operator_name_shape"], n)
 
     def test_operator_regex_edge_cases(self):
-        """T1 needs whole words (hostels is not hosting); T2 only-names are flagged by T2 and not T1; the `net` suffix flags planet and magnet."""
-        rows, _, _ = run_signals([host(n) for n in ("hostels inc", "research lab", "planet", "magnet corp", "acme servers", "cloud")])
+        """T1 needs whole words (hostels is not hosting); T2 only-names are flagged by T2 and not T1; the `net` suffix is no longer flagged (D11.1)."""
+        rows, _, _ = run_signals([host(n) for n in ("hostels inc", "research lab", "planet", "magnet corp", "acme servers", "cloud", "bellnet")])
         self.assertFalse(rows["hostels inc"]["operator_shape_t1"])
         self.assertTrue(rows["hostels inc"]["operator_shape_t2"])
         self.assertTrue(rows["research lab"]["operator_shape_t1"])
-        self.assertTrue(rows["planet"]["operator_shape_t2"])
-        self.assertTrue(rows["magnet corp"]["operator_shape_t2"])
+        for n in ("planet", "magnet corp", "bellnet"):
+            self.assertFalse(rows[n]["operator_shape_t2"], n)
+            self.assertFalse(rows[n]["operator_name_shape"], n)
         self.assertTrue(rows["acme servers"]["operator_shape_t1"])
         self.assertTrue(rows["cloud"]["operator_shape_t1"])
 
