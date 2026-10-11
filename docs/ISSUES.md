@@ -194,6 +194,11 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   Whether a telecom as a cert tenant should count is a design question (hypothesis: the stage author wanted tenants kept); the contract says no ISP names as companies.
 - Fix: owner / senior-data-engineer decision; either apply keyword rules to cert O, or accept and document an exception. Not applied by DQ.
 - Contract rule: `denylist: {column: name_norm, rules: shared}` in `context/contracts/hosts.yml` (fails today); `check_hosts_extra.py` repeats it on org rows only (passes).
+- Status: FIXED (re-validated 2026-10-11 on `pipeline/1_clean.py` at e4c3867, spread sample, 97,758 rows; owner of the check: data-quality-engineer). D6.4: `vendor = bool(hit)` (every rule type including keywords) plus the vendor and
+  name-guard entries in `context/cert_default_names.txt`. Measured: 0 of 428 distinct cert_o names (557 rows) hit any shared rule or a cert default; the three named telecom names and Huawei, Sierra Wireless, Comcast, `dis`,
+  Meta Platforms, Facebook, Apple and Netflix each have 0 cert_o rows; cert_o rows 644 to 557. The independent recompute of cert-O usability agrees with the stage on all 557 rows (0 only-mine, 0 only-stage, 0 name differences).
+- Contract rules now catching it: `denylist: {column: name_norm, rules: shared}` (whole column, 0 hits, unchanged); `check_hosts_extra.py` assertion (a) no cert_o `name_norm` or cert O is in `cert_default_names.txt`
+  and assertion (b) independent cert-O usability recompute equals the stage (both tested in `test_check_contract.py::CertOAssertionTests`). Completeness of the cert list is NOT caught, see PIPE-004.
 
 ## DQ-002 ISP and hosting orgs survive as identity_source = 'org' (long tail, residual of RAW-013)
 - Symptom: among the 50 largest orgs with `identity_source = 'org'`, 20 orgs (537 rows) look like ISP, telecom or hosting by name (names only, one reviewer, crude keyword scan):
@@ -207,6 +212,7 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   denylist rule above fails as soon as a rule for these names is added to `context/denylist*.txt` and the stage is not rerun.
 - Update 2026-10-11, D7 step 1 (branch `feat/data-integrator/d7-prefixes`, proposed; decided by senior-data-engineer): DQ-002 residual accepted under D7.2. The residual metric is now
   judged on the full run by the top 50 orgs by final `contact_score`; reopen if more than 5 of the 50 read as operators. Status: ACCEPTED (D7.2).
+- Status (2026-10-11 recheck): ACCEPTED (D7.2) confirmed in the entry above; decision not edited. New measurement for the senior engineer: see DQ-005 (the long tail is wider than the row-count top 50 shows).
 
 ## DQ-003 Removed duplicate rows are re-scans, not copies (extends PIPE-002)
 - Symptom: the stage report says "2,242 duplicate rows removed". Recomputed from the raw sample: 100,000 rows, 97,758 distinct keys, 1,098 key groups covering 3,340 rows;
@@ -215,6 +221,9 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Root cause: as PIPE-002 (same endpoint scanned again with another banner or hostname); this is a measurement, not a new defect.
 - Fix: none required for correctness of the key; decision on aggregating hostnames stays open (owner).
 - Contract rule: key (host_ip, port, transport) unique and non-null (passes). The "lost hostnames" effect has no rule; it is documented only.
+- Status (2026-10-11 recheck): UNCHANGED, still a documented measurement. Recomputed on the D6/D7 output: 100,000 raw rows, 97,758 keys, 2,242 removed, 1,098 groups, 0 groups of one-timestamp copies, kept row is the latest in all groups;
+  `dup_count` now records the group size: `sum(dup_count - 1)` = 2,242 = raw rows minus kept rows, and `dup_count` equals my per-key count on every row. Contract rules added: `dup_count` INTEGER, not null, >= 1, and the custom
+  check `sum(dup_count - 1) + count(*) = 100000` (sample constant; replace with the full-file raw row count on the full run).
 
 ## DQ-004 RAT noise rule is suffix-based: 185 backdoor-module rows are not noise
 - Symptom: `is_noise` flags 505 of 505 rows whose `shodan_module` ends in 'rat' (matches the stated rule exactly), but `xiaongmai-backdoor` (183 rows) and `njrat78` (2 rows)
@@ -223,9 +232,22 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Fix: owner decision. If accepted as noise, extend the rule; if not, document the module names as accepted.
 - Contract rule: "is_noise rows have a tag or a module ending rat" and "noise tags or RAT module imply is_noise" (both pass). A rule for 'backdoor' / 'rat' anywhere in the name is NOT added
   because it would fail on a decision that is still open; add it when the owner decides.
+- Status: CLOSED by design (D6.1, 2026-10-11). The rule is now the explicit pattern `(^|-)rat$|^njrat$|^blackshades$`: noise rows 1,089 to 1,136 (the 47 added rows are `blackshades`, all flagged noise).
+  `njrat78` (2 rows) and `xiaongmai-backdoor` (183 rows) are deliberately NOT noise; recomputed: 0 of the 185 are `is_noise` through the module. Contract rules replaced and added in `hosts.yml`: "D6.1 RAT module pattern implies
+  is_noise", "is_noise rows have a noise tag or a module matching the D6.1 pattern", "njrat78 and xiaongmai-backdoor are not noise by module alone". Mutation test: flipping `njrat` rows to not-noise and `xiaongmai-backdoor` to noise fails all three.
 
 ## PIPE-004 Cert O still admits device-vendor, router-model, hostname and random-string values after D6 (residual of DQ-001)
 - Symptom: after the D6 rules, 557 `cert_o` rows (420 distinct names) remain on the spread sample. A regex read of the cert O text (one reviewer, crude, so an upper bound) flags about 83 rows / 73 names that are not tenants: device vendors (Grandstream, Hanwha Techwin, Super Micro Computer, UBNT, NETGEAR, ZTE, Dahua, Foscam, Cradlepoint, Avigilon, Samsung Electronics, Dell Inc.), router or firmware strings (`RT-AX88U-AF80`, `ZenWiFi_XD4-58D0`, `OpenWrt16ef7d1c`, `Teltonika38b8a02e`, `ASUSWRT-Merlin-KoolShare`), hostnames used as O (`mail.kavzesmail.com`, `*.esecuritel.com`), random strings (`ZVZOWZYKN`, `JFYRFHEOWRJUWYDM`), placeholders (`Dummy`, `Internal`), and operators the keyword list does not cover (a ChinaNetCenter cert O, `Aruba S.p.A.`, `Beijing Baidu Netcom`).
 - Root cause: the cert O check uses the shared org-name denylist plus `cert_default_names.txt`; those lists were built for registrant names, not for device certificate strings. D6.4 listed a fixed set of vendors; the long tail is open by design. Not a code error: `1_clean.py` applies `match_name` (all rule types) as decided.
 - Fix: none in this stage (no rule added to make a check pass). Options for the owner/senior: extend `cert_default_names.txt` through the integrator's gate, or a name-shape guard at stage 2/4 (hostname-like or all-caps random string). D6.4 stage 3 rule already limits host-borne signals for cert_o companies.
 - Contract rule: none catches it today; the `check_hosts_extra.py` recompute of `cert_usable` only proves the stage applies the rule, not that the rule is complete.
+- Update (data-quality-engineer, 2026-10-11, measurement for the senior): by hand review of cert_o names only, about 21% of cert_o rows and 23% of distinct names are not plausible tenants counting UNSURE (12% and 14% if UNSURE counted as tenants), below a 90% tenant bar. See `outputs/dq/hosts_recheck_2026-10-11.md`.
+
+## DQ-005 The operator long tail is wider than the row-count top 50 shows (measurement for D7.2; two small leaks)
+- Symptom: on `identity_source = 'org'` (12,804 rows, 5,395 distinct names, 3,834 of them with one row) a seeded sample (seed 5) of 20 single-row names read, by name only, as network operators, hosts or research networks for 9 of 20
+  (Asian Internet Interconnection Initiatives, DFN research network, Cape Connect Internet, KatCloud, Binary Racks Cloud, MM Comunicaciones, AGE Telecomunicacoes Ltda, Itanetbahia Comunicacao Multimidia, EDIS Infrastructure), 3 more unsure.
+  Top-20 by rows are mostly real companies (Egnyte, Fiserv, Wal-Mart, Avago, Salesforce, ServiceNow) but include Guangzhoushi Guangbodianshiwangluo 64 (a broadcast network) and Huawei International 34. Also: `Huawei Clouds Chile` (5 rows) is `org`
+  while `Huawei Cloud Thailand Region` is a prefix hit; `TIM S/A` and `IP hosted by Host-Unlimited.de` are `org`.
+- Root cause (hypothesis, labelled): the D6.7/D7.2 rules are word and prefix lists; a one-row operator name has no rule. The D7.2 trigger uses the top 50 by `contact_score`, which is biased to multi-row, multi-vulnerability orgs, so it may understate the tail that a rep scrolls to.
+- Fix: none by DQ (decided D7.2: accepted, M2 `operator_name_shape` penalty). Informational for the senior: the tail share of one-row names is about 40% by a 20-name sample (names only, single reviewer, wide interval); re-measure on the full run.
+- Contract rule: none can catch an unlisted name. The resolved-share range (5% to 20%, measured 13.67%) and the shared denylist on `name_norm` stay as the guards.

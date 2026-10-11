@@ -1,4 +1,4 @@
-"""Tests for check_contract.py: old and shared denylist modes, infra_reason values, shares, missing files."""
+"""Tests for check_contract.py and check_hosts_extra.py: denylist modes, infra_reason values, shares, cert_o assertions, recompute rules."""
 import shutil
 import subprocess
 import sys
@@ -11,6 +11,7 @@ import duckdb
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import check_contract as cc  # noqa: E402
+import check_hosts_extra as ex  # noqa: E402
 
 
 def make_con(rows, columns=("name", "isp")):
@@ -115,8 +116,8 @@ class SharedModeTests(unittest.TestCase):
             self.assertFalse(ok, name)
 
     def test_real_company_not_flagged(self):
-        """Real companies pass, including near-miss words."""
-        ok, ev = flagged(["Stripe, Inc.", "Acme Bank", "OVHTECH", "Webhosting Pioneers", "Vpnsoft"])
+        """Real companies pass, including near-miss words (ghosting is excluded from the *hosting compound rule; webhosting is matched by design)."""
+        ok, ev = flagged(["Stripe, Inc.", "Acme Bank", "OVHTECH", "Ghosting Media", "Vpnsoft"])
         self.assertTrue(ok, ev)
 
     def test_reports_at_most_five_examples(self):
@@ -228,6 +229,87 @@ class SharesTests(unittest.TestCase):
         self.assertFalse(res[1][1])
         res = run(cc.check_shares, make_con([(None,), ("org",)], ("identity_source",)), rule)
         self.assertFalse(res[0][1])
+
+
+class CertOAssertionTests(unittest.TestCase):
+    """The cert_o assertions and the independent recompute rules of check_hosts_extra.py (D6)."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Load the real shared matcher, rules and cert defaults once."""
+        cls.matcher = ex.load_matcher()
+        cls.rules = cls.matcher.load_rules()
+        cls.defaults = cls.matcher.load_cert_defaults()
+
+    def usable(self, name):
+        """Return cert_usable for a name with the real rules."""
+        return ex.cert_usable(name, self.matcher, self.rules, self.defaults)
+
+    def test_usable_tenant_and_rejections(self):
+        """A tenant is usable; a default, a keyword hit, an exact hit, a prefix hit, an empty string and None are not."""
+        self.assertTrue(self.usable("Accenture"))
+        self.assertFalse(self.usable("Plesk"))          # cert default
+        self.assertFalse(self.usable("Bouygues Telecom"))  # keyword rule (D6.4: keywords apply to cert O)
+        self.assertFalse(self.usable("Google LLC"))     # exact rule
+        self.assertFalse(self.usable("Microsoft Azure"))  # prefix rule
+        self.assertFalse(self.usable("   "))
+        self.assertFalse(self.usable(None))
+
+    def test_recompute_flags_precedence(self):
+        """Noise wins, then org, then cert_o for infrastructure or null-org rows, then unresolved, then null_org."""
+        def flags(**kw):
+            """Return recompute_flags for a row with defaults overridden by kw."""
+            row = {"host_ip": "8.8.4.4", "org": None, "tags": [], "cp": None, "module": None, "cert_o": None}
+            row.update(kw)
+            return ex.recompute_flags(row, self.matcher, self.rules, self.defaults)
+        self.assertEqual(flags(tags=["honeypot"], org="Stripe")[2], "noise")
+        self.assertEqual(flags(org="Stripe, Inc.")[2:], ("org", "stripe"))
+        self.assertEqual(flags(org="Google LLC", cert_o="Accenture")[2:], ("cert_o", "accenture"))
+        self.assertEqual(flags(cert_o="Accenture")[2], "cert_o")      # null org, usable cert O
+        self.assertEqual(flags(org="Google LLC", cert_o="Plesk")[2], "infrastructure_unresolved")
+        self.assertEqual(flags()[2], "null_org")
+
+    def test_noise_module_pattern(self):
+        """The D6.1 pattern flags rat modules, njrat and blackshades, and not njrat78 or xiaongmai-backdoor."""
+        for module, want in (("darktrack-rat", True), ("njrat", True), ("blackshades", True), ("rat", True),
+                             ("njrat78", False), ("xiaongmai-backdoor", False), ("pirate", False)):
+            row = {"host_ip": "8.8.4.4", "org": "Stripe", "tags": [], "cp": None, "module": module, "cert_o": None}
+            self.assertEqual(ex.recompute_flags(row, self.matcher, self.rules, self.defaults)[1], want, module)
+
+    def hosts_con(self, rows):
+        """Build a hosts table (identity_source, name_norm, cert_subject_o) from rows."""
+        con = make_con(rows, ("identity_source", "name_norm", "cert_subject_o"))
+        con.execute("CREATE VIEW hosts AS SELECT * FROM t")
+        return con
+
+    def test_assertion_a_catches_default_name(self):
+        """A cert_o row whose name_norm is a cert default is reported; a tenant and a non-cert_o row are not."""
+        con = self.hosts_con([("cert_o", "plesk", "Plesk"), ("cert_o", "accenture", "Accenture"), ("org", "plesk", None)])
+        self.assertEqual(ex.cert_o_default_rows(con, self.matcher, self.defaults), [("plesk", 1)])
+
+    def test_assertion_a_clean(self):
+        """No default names gives an empty list."""
+        con = self.hosts_con([("cert_o", "accenture", "Accenture")])
+        self.assertEqual(ex.cert_o_default_rows(con, self.matcher, self.defaults), [])
+
+    def test_assertion_b_disagreements(self):
+        """Rows only I classify as cert_o, only the stage does, and a differing name are each reported."""
+        mine = {("1", 1, "tcp"): "a", ("2", 1, "tcp"): "b", ("3", 1, "tcp"): "c"}
+        parquet = [(("1", 1, "tcp"), "cert_o", "a"), (("2", 1, "tcp"), "infrastructure_unresolved", None),
+                   (("3", 1, "tcp"), "cert_o", "other"), (("4", 1, "tcp"), "cert_o", "d")]
+        only_mine, only_theirs, names = ex.cert_o_disagreements(mine, parquet)
+        self.assertEqual(only_mine, [("2", 1, "tcp")])
+        self.assertEqual(only_theirs, [("4", 1, "tcp")])
+        self.assertEqual(names, [("3", 1, "tcp")])
+
+    def test_cert_invalid(self):
+        """Dates outside 1990..2100, unparseable text and an invalid month are invalid; valid and null dates are not."""
+        self.assertFalse(ex.cert_invalid("20300101000000Z", "20200101000000Z"))
+        self.assertFalse(ex.cert_invalid(None, None))
+        self.assertTrue(ex.cert_invalid("20300101000000Z", "19700101000000Z"))
+        self.assertTrue(ex.cert_invalid("40960101000000Z", None))
+        self.assertTrue(ex.cert_invalid("garbage", None))
+        self.assertTrue(ex.cert_invalid("20301301000000Z", None))
 
 
 if __name__ == "__main__":
