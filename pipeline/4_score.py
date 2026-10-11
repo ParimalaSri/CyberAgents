@@ -34,7 +34,7 @@ PTS_LEGACY_TLS = 5
 PTS_TERRITORY = 35  # fit: in_territory (the territory list in stage 3 is itself a placeholder)
 PTS_FOOTPRINT_PER_BAND = 15  # fit: footprint_band x 15
 PTS_SENSITIVE = 20  # fit: sensitive_stack
-PENALTY_OPERATOR_T1 = 30  # fit: subtracted when operator_shape_t1 is true (T1 ONLY, see the comment at FIT_SQL)
+PENALTY_OPERATOR = 30  # fit: subtracted when operator_name_shape (the T1-or-T2 union) is true; D10, provisional until the data-analyst T2 gate (D9.5)
 FLOOR_PCT = 50  # contact form (b): FLOOR = 0.50, kept as a whole percent so the arithmetic is exact in integers
 CONTACT_FORM = "b"  # "b" urgency gated by fit (recommended in D9.6 item 4); "a" weighted sum, kept only for the calibration comparison
 W_F_PCT = 30  # form (a) only: weight of fit in percent; D9 gives no value, so this is a placeholder invented only to exercise form (a)
@@ -48,6 +48,8 @@ NOISE_MIN_SHARE = 0.5  # ... and at least this noise share
 CAP_SINGLETON = "singleton"
 CAP_LOW_CONFIDENCE = "low_confidence"
 CAP_OPERATOR = "operator_name_shape"
+CAP_UNVERIFIED = "operator_unverified"  # D10: every would-be contact is held in review until an adjudicator or ASN reference checks it
+UNVERIFIED_CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10 text, appended last for every would-be contact
 CAP_CLAUSES = (  # priority order for the single cap clause in the why
     (CAP_OPERATOR, "Name looks like a network operator."),
     (CAP_SINGLETON, "Only one host seen."),
@@ -59,8 +61,8 @@ PORT_NAMES = {22: "SSH", 3389: "RDP", 445: "SMB", 3306: "MySQL", 6379: "Redis", 
 PORTS_SHOWN = 2  # at most this many ports are named in a why
 SSH_PORT = 22
 BANDS = ("contact", "review", "skip", "exclude")
-SENIOR_RUN = {  # D9.8 provisional run (ad hoc, T1 plus T2 penalty): thresholds -> (contact, review, skip, exclude)
-    (45, 25): (43, 530, 5216, 1), (40, 20): (71, 593, 5125, 1), (35, 15): (138, 536, 5115, 1)}
+D10_EXPECTED = {"contact": "0", "review": "about 660", "skip": "about 5,125", "exclude": "1"}  # senior's D10 expectation at 40 / 20 on the sample
+PREVIOUS_RUN = {"contact": 70, "review": 594, "skip": 5125, "exclude": 1}  # this stage before D10 (T1-only penalty, caps for singleton, low confidence, operator shape), 40 / 20
 COMPARE_PAIRS = ((45, 25), (40, 20), (35, 15))
 TOP_N = 25
 HISTOGRAM_BUCKETS = 10
@@ -98,20 +100,23 @@ def band_sql(contact, review):
     """Return a SQL CASE expression for the final band at the given thresholds, in D9.6 order: exclude, thresholds, then caps."""
     exclude = f"(noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})"
     uncapped = f"CASE WHEN contact_score >= {contact} THEN 'contact' WHEN contact_score >= {review} THEN 'review' ELSE 'skip' END"
-    capped = "(is_singleton OR identity_confidence = 'low' OR operator_name_shape)"
-    return f"CASE WHEN {exclude} THEN 'exclude' WHEN contact_score >= {contact} AND {capped} THEN 'review' ELSE {uncapped} END"
+    return f"CASE WHEN {exclude} THEN 'exclude' WHEN contact_score >= {contact} THEN 'review' ELSE {uncapped} END"  # D10: every would-be contact is capped by operator_unverified
+
+
+def contact_expr_sql(fit_col):
+    """Return the SQL integer expression of contact_score for the active CONTACT_FORM from urgency_score and the given fit column."""
+    if CONTACT_FORM == "b":
+        return f"(urgency_score * ({FLOOR_PCT * 100} + {100 - FLOOR_PCT} * {fit_col}) + 5000) // 10000"
+    return f"({W_F_PCT} * {fit_col} + {100 - W_F_PCT} * urgency_score + 50) // 100"
 
 
 def build_scored(con, input_path, contact, review):
     """Create table scored: the signals plus point columns, the three scores, band_uncapped, cap_reasons and band (D9.6 items 2 to 5)."""
     con.execute(f"CREATE OR REPLACE TABLE signals AS SELECT * FROM read_parquet('{quote_path(input_path)}')")
     cvss = cvss_points_sql()
-    # Fit penalty uses operator_shape_t1 ONLY. T2 (operator_shape_t2) is computed in stage 3 and is deliberately NOT used in the
-    # penalty until the data-analyst's T2 gate passes (D9.5). The caps below still use operator_name_shape (the T1-or-T2 union), as D9.6 item 5 says.
-    if CONTACT_FORM == "b":
-        contact_expr = f"(urgency_score * ({FLOOR_PCT * 100} + {100 - FLOOR_PCT} * fit_score) + 5000) // 10000"
-    else:
-        contact_expr = f"({W_F_PCT} * fit_score + {100 - W_F_PCT} * urgency_score + 50) // 100"
+    # D10: the fit penalty and the cap both use operator_name_shape, the union of operator_shape_t1 and operator_shape_t2 (D9.5). The union is
+    # provisional: the data-analyst's fresh-sample T2 gate (D9.5) is still pending and may reduce it to T1 or to the clean T2 sub-patterns.
+    contact_expr = contact_expr_sql("fit_score")
     con.execute(
         f"""
         CREATE OR REPLACE TABLE pts AS
@@ -128,7 +133,7 @@ def build_scored(con, input_path, contact, review):
             (footprint_band * {PTS_FOOTPRINT_PER_BAND})::INTEGER AS p_footprint,
             (CASE WHEN coalesce(in_territory, false) THEN {PTS_TERRITORY} ELSE 0 END)::INTEGER AS p_territory,
             (CASE WHEN sensitive_stack THEN {PTS_SENSITIVE} ELSE 0 END)::INTEGER AS p_sensitive,
-            (CASE WHEN operator_shape_t1 THEN {PENALTY_OPERATOR_T1} ELSE 0 END)::INTEGER AS p_penalty
+            (CASE WHEN operator_name_shape THEN {PENALTY_OPERATOR} ELSE 0 END)::INTEGER AS p_penalty
         FROM signals
         """
     )
@@ -150,6 +155,7 @@ def build_scored(con, input_path, contact, review):
             (CASE WHEN contact_score >= {contact} AND NOT (noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})
                   THEN nullif(concat_ws(',', CASE WHEN identity_confidence = 'low' THEN '{CAP_LOW_CONFIDENCE}' END,
                                              CASE WHEN operator_name_shape THEN '{CAP_OPERATOR}' END,
+                                             '{CAP_UNVERIFIED}',
                                              CASE WHEN is_singleton THEN '{CAP_SINGLETON}' END), '')
                   ELSE NULL END) AS cap_reasons
         FROM scored
@@ -204,18 +210,19 @@ def cap_clause(cap_reasons):
 
 
 def build_why(row):
-    """Return (top_signals, why) for one account: exclude text, no-signal text, or the top two signals by points plus one cap clause (D9.8)."""
+    """Return (top_signals, why) for one account: exclude text, no-signal text, or the top two signals plus one cap clause and the D10 operator clause."""
     if row["band"] == "exclude":
         return None, f"Mostly honeypot or attacker-infrastructure hosts ({row['noise_host_count']} of {row['host_count'] + row['noise_host_count']})."
     clause = cap_clause(row["cap_reasons"])
     if row["urgency_score"] == 0:
-        return None, " ".join(x for x in (f"No exposure signal found in the scan ({plural_hosts(row['host_count'])} seen).", clause) if x)
+        return None, " ".join(x for x in (f"No exposure signal found in the scan ({plural_hosts(row['host_count'])} seen).", clause) if x)  # never a would-be contact
     ranked = sorted(signal_candidates(row), key=lambda c: (-c[0], c[1], c[2]))
+    unverified = UNVERIFIED_CLAUSE if CAP_UNVERIFIED in (row["cap_reasons"] or "").split(",") else ""
     tail = clause or ("Exposure is limited." if row["band"] == "skip" else "")
     for keep in (2, 1):
         top = ranked[:keep]
         body = "; ".join(c[4] for c in top)
-        why = " ".join(x for x in (body[0].upper() + body[1:] + ".", tail) if x)
+        why = " ".join(x for x in (body[0].upper() + body[1:] + ".", tail, unverified) if x)
         if len(why.split()) <= WHY_MAX_WORDS:
             return ",".join(c[3] for c in top), why
     raise AssertionError(f"why too long even with one signal: {why}")
@@ -331,20 +338,22 @@ def section_bands(con, rep, contact, review, total):
     rep.add(f"\n## 3. Bands at contact >= {contact}, review >= {review} (PROVISIONAL)\n")
     counts = dict(con.execute("SELECT band, count(*) FROM accounts GROUP BY 1").fetchall())
     rep.table(("band", "accounts", "share"), [(b, f"{counts.get(b, 0):,}", pct(counts.get(b, 0), total)) for b in BANDS])
-    rep.add("\n### Threshold previews against the senior's provisional run (D9.8, ad hoc, T1 plus T2 penalty)\n")
+    rep.add(f"\n### Previous run and the senior's D10 expectation (at {contact} / {review})\n")
+    rows = [(b, f"{PREVIOUS_RUN[b]:,}", D10_EXPECTED[b], f"{counts.get(b, 0):,}") for b in BANDS]
+    rep.table(("band", "previous run (pre-D10)", "senior's D10 expectation", "this run"), rows)
+    rep.add("\n### Threshold previews (every would-be contact is held in review by operator_unverified)\n")
     rows = []
     for pair in COMPARE_PAIRS:
         mine = band_counts(con, *pair)
-        senior = SENIOR_RUN[pair]
-        rows.append((f"{pair[0]} / {pair[1]}", " / ".join(f"{mine[b]:,}" for b in BANDS), " / ".join(f"{n:,}" for n in senior),
-                     " / ".join(f"{mine[b] - n:+,}" for b, n in zip(BANDS, senior))))
-    rep.table(("contact / review thresholds", "this stage: contact / review / skip / exclude", "senior: same order", "difference"), rows)
+        would = con.execute(f"SELECT count(*) FROM scored WHERE contact_score >= {pair[0]} AND NOT (noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})").fetchone()[0]
+        rows.append((f"{pair[0]} / {pair[1]}", " / ".join(f"{mine[b]:,}" for b in BANDS), f"{would:,}"))
+    rep.table(("contact / review thresholds", "this stage: contact / review / skip / exclude", "would-be contacts (now in review)"), rows)
     rep.add(f"\n### Cap effects (at {contact} / {review})\n")
-    would = con.execute(f"SELECT count(*) FROM scored WHERE band_uncapped = 'contact'").fetchone()[0]
+    would = con.execute("SELECT count(*) FROM scored WHERE band_uncapped = 'contact'").fetchone()[0]
     moved = con.execute("SELECT count(*) FROM accounts WHERE cap_reasons IS NOT NULL").fetchone()[0]
-    rep.add(f"Would-be contacts (band_uncapped = contact, not excluded): {would:,}; moved to review by a cap: {moved:,}; remain contact: {would - moved:,}.")
+    rep.add(f"Would-be contacts (band_uncapped = contact, not excluded): {would:,}; moved to review by a cap: {moved:,}; remain contact: {would - moved:,} (D10: none; only adjudication may set final_band = contact).")
     rows = [(reason, con.execute(f"SELECT count(*) FROM accounts WHERE list_contains(string_split(coalesce(cap_reasons, ''), ','), '{reason}')").fetchone()[0])
-            for reason, _ in CAP_CLAUSES]
+            for reason in [r for r, _ in CAP_CLAUSES] + [CAP_UNVERIFIED]]
     only = dict(con.execute("SELECT cap_reasons, count(*) FROM accounts WHERE cap_reasons IS NOT NULL GROUP BY 1 ORDER BY 2 DESC").fetchall())
     rep.table(("cap reason (accounts carrying it; some carry two or three)", "accounts"), rows)
     rep.add("\nBy exact reason set: " + "; ".join(f"{k} = {v}" for k, v in only.items()) + ".")
@@ -354,13 +363,35 @@ def section_bands(con, rep, contact, review, total):
         "count(*) FILTER (WHERE s.is_singleton), count(*) FILTER (WHERE s.operator_name_shape), "
         "count(*) FILTER (WHERE s.identity_confidence = 'low'), count(*) FILTER (WHERE s.country_code = 'US') "
         "FROM accounts a JOIN scored s ON s.company_id = a.account_id WHERE a.band = 'review'").fetchone()
-    rep.table(("review accounts", "value", "senior (40 / 20)"), [
+    rep.table(("review accounts", "value", "D9.8 pre-D10 (40 / 20)"), [
         ("total", f"{rv:,}", "593"), ("reached by a cap (was contact)", f"{capped:,}", "37"), ("reached by threshold alone", f"{thr:,}", "556"),
         ("singletons", f"{single:,}", "325"), ("operator-shaped (T1 or T2)", f"{op:,}", "187"), ("low identity confidence", f"{low:,}", "21"),
         ("country US", f"{us:,}", "125")])
     excl = con.execute("SELECT company_name, host_count, noise_host_count, noise_host_share FROM scored WHERE band = 'exclude'").fetchall()
     rep.add(f"\nExclude band (D9.3 rule, noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE}): {len(excl)} account(s): "
             + "; ".join(f"{n} ({h} hosts, {k} noise rows, share {s:.2f})" for n, h, k, s in excl) + ".")
+
+
+def section_union_effect(con, rep, n):
+    """Report how many accounts lose fit because the penalty now covers T2-only names (D10) and how contact_score ranks moved, versus a T1-only penalty."""
+    rep.add("\n### Effect of the union penalty (D10) versus the previous T1-only penalty\n")
+    base = "p_territory + p_footprint + p_sensitive"
+    t1_fit = f"greatest(0, least(100, {base} - CASE WHEN operator_shape_t1 THEN {PENALTY_OPERATOR} ELSE 0 END))"
+    alt = contact_expr_sql("t1_fit")
+    con.execute(f"CREATE OR REPLACE TABLE rank_cmp AS SELECT company_id, fit_score, contact_score, urgency_score, host_count, {t1_fit} AS t1_fit FROM scored")
+    con.execute(f"CREATE OR REPLACE TABLE rank_cmp AS SELECT *, ({alt})::INTEGER AS t1_contact FROM rank_cmp")
+    con.execute("CREATE OR REPLACE TABLE rank_cmp AS SELECT *, row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC, host_count DESC, company_id) AS rank_new, "
+                "row_number() OVER (ORDER BY t1_contact DESC, urgency_score DESC, host_count DESC, company_id) AS rank_old FROM rank_cmp")
+    changed, lost, avg_loss, cchanged, max_loss = con.execute(
+        "SELECT count(*) FILTER (WHERE fit_score <> t1_fit), sum(t1_fit - fit_score), avg(t1_fit - fit_score) FILTER (WHERE fit_score <> t1_fit), "
+        "count(*) FILTER (WHERE contact_score <> t1_contact), max(t1_fit - fit_score) FROM rank_cmp").fetchone()
+    rep.add(f"Accounts whose fit_score fell because the penalty now covers T2-only names: {changed:,} (total {lost or 0:,} fit points, mean {avg_loss or 0:.1f} per changed account, max {max_loss or 0}); "
+            f"accounts whose contact_score changed: {cchanged:,}.")
+    for k in (25, 50):
+        gone = con.execute(f"SELECT count(*) FROM rank_cmp WHERE rank_old <= {k} AND rank_new > {k}").fetchone()[0]
+        rep.add(f"Of the previous top {k} by contact_score, {gone} are no longer in the top {k}.")
+    shifted, worst = con.execute(f"SELECT count(*) FILTER (WHERE rank_new <> rank_old), max(abs(rank_new - rank_old)) FILTER (WHERE rank_old <= {n} OR rank_new <= {n}) FROM rank_cmp").fetchone()
+    rep.add(f"Accounts with a different overall rank: {shifted:,}; largest rank shift among accounts in either top {n}: {worst or 0}.")
 
 
 def section_top(con, rep, n):
@@ -389,13 +420,13 @@ def section_output(con, rep, output_path, signals_rows):
             f"(asserted: one row per company, account_id unique, no fan-out, no drop).\n\nColumns: " + ", ".join(f"{n} {t}" for n, t in cols) + ".\n")
     bad = con.execute(
         f"SELECT count(*) FROM accounts WHERE fit_score NOT BETWEEN 0 AND 100 OR urgency_score NOT BETWEEN 0 AND 100 OR contact_score NOT BETWEEN 0 AND 100 "
-        f"OR final_band <> band OR band IS NULL OR band_uncapped IS NULL OR trim(why) = '' OR decision IS NOT NULL OR prompt_version IS NOT NULL").fetchone()[0]
+        f"OR final_band <> band OR band = 'contact' OR band IS NULL OR band_uncapped IS NULL OR trim(why) = '' OR decision IS NOT NULL OR prompt_version IS NOT NULL").fetchone()[0]
     assert bad == 0, f"{bad} accounts break a basic invariant"
     if CONTACT_FORM == "b":
         viol = con.execute(f"SELECT count(*) FROM accounts WHERE contact_score > urgency_score OR contact_score * 100 < {FLOOR_PCT} * urgency_score - 50").fetchone()[0]
         assert viol == 0, f"{viol} accounts break FLOOR * urgency <= contact <= urgency"
     rep.add("Asserted in the run: scores within 0 to 100; every account has a band, band_uncapped and a non-empty why; final_band = band; decision and "
-            "prompt_version all null (LLM adjudication is a later milestone); FLOOR * urgency <= contact_score <= urgency (rounding tolerance 0.5).\n")
+            "prompt_version all null and no account in band contact (D10: only LLM adjudication may set final_band = contact); FLOOR * urgency <= contact_score <= urgency (rounding tolerance 0.5).\n")
     rep.add("Null rates (all columns, worst first):\n")
     rep.table(("column", "null rate"), [(c, f"{p}%") for c, p in report.null_rates(con, out, KEY_COLUMNS, total)])
     rep.add("\n5 random rows:\n")
@@ -410,13 +441,14 @@ def print_report(con, run, output_path, report_path, contact, review):
     rep = Report()
     total = run["accounts_rows"]
     rep.add(f"# Accounts stage report ({datetime.date.today().isoformat()})\n")
-    rep.add("**PROVISIONAL CONSTANTS: not calibrated, not owner-approved.** Points, FLOOR, thresholds and the T1-only penalty are the D9.7 starting point, "
+    rep.add("**PROVISIONAL CONSTANTS: not calibrated, not owner-approved.** Points, FLOOR, thresholds and the T1-or-T2 operator penalty (D10, T2 gate pending) are the D9.7 starting point, "
             "used so the stage can be exercised; read no band here as a decision. Contact form: "
             f"({CONTACT_FORM}), FLOOR {FLOOR_PCT / 100:.2f}, X = {contact}, Y = {review}.\n")
     rep.add("## 1. Row counts\n")
     rep.add(f"signals {run['signals_rows']:,} = accounts {total:,} (asserted; account_id unique, equal to company_id). Output: {Path(output_path).as_posix()}.")
     section_distributions(con, rep, output_path, total)
     section_bands(con, rep, contact, review, total)
+    section_union_effect(con, rep, TOP_N)
     section_top(con, rep, TOP_N)
     section_output(con, rep, output_path, run["signals_rows"])
     rep.save(report_path)

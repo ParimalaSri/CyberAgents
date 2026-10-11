@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SIGNALS = ROOT / "data" / "gold" / "signals.parquet"
 ACCOUNTS = ROOT / "data" / "gold" / "accounts.parquet"
 FORBIDDEN_WORDS = ("breach", "compromised", "hacked")
+CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10 text
 
 
 def urgency_of(s):
@@ -30,8 +31,8 @@ def urgency_of(s):
 
 
 def fit_of(s):
-    """Return the D9.7 provisional fit: territory 35, footprint band x 15, sensitive 20, minus 30 for the T1 flag, clipped to 0..100."""
-    pts = (35 if s["in_territory"] else 0) + 15 * s["footprint_band"] + (20 if s["sensitive_stack"] else 0) - (30 if s["operator_shape_t1"] else 0)
+    """Return the D9.7 provisional fit: territory 35, footprint band x 15, sensitive 20, minus 30 for the T1-or-T2 union flag (D10), clipped to 0..100."""
+    pts = (35 if s["in_territory"] else 0) + 15 * s["footprint_band"] + (20 if s["sensitive_stack"] else 0) - (30 if (s["operator_shape_t1"] or s["operator_shape_t2"]) else 0)
     return max(0, min(100, pts))
 
 
@@ -48,6 +49,7 @@ def band_of(s, contact, contact_x, review_y):
     unc = "contact" if contact >= contact_x else "review" if contact >= review_y else "skip"
     reasons = []
     if unc == "contact":
+        reasons.append("operator_unverified")  # D10: every would-be contact
         if s["identity_confidence"] == "low":
             reasons.append("low_confidence")
         if s["operator_name_shape"]:
@@ -106,6 +108,8 @@ def check_account(sig, acc, contact_x, review_y):
         if expected is None and got is not None or expected is not None and (got is None or got != expected[:len(got)]):
             problems.append(f"top_signals: independent {expected!r} vs stage {got!r}")
     why = acc["why"] or ""
+    if (unc == "contact") != why.endswith(CLAUSE) or (unc != "contact" and CLAUSE in why):
+        problems.append(f"D10 clause wrong for band_uncapped {unc}: {why!r}")
     words = len(why.split())
     if not why.strip() or words > 40 or "=" in why or "_" in why or any(w in why.lower() for w in FORBIDDEN_WORDS):
         problems.append(f"why fails shape rules ({words} words): {why!r}")
@@ -113,8 +117,8 @@ def check_account(sig, acc, contact_x, review_y):
         problems.append("final_band/decision/prompt_version not as at stage 4")
     if not (0 <= f <= 100 and 0 <= u <= 100 and 0 <= c <= 100 and u / 2 - 0.5 <= c <= u):
         problems.append(f"invariant broken: fit {f}, urgency {u}, contact {c}")
-    if acc["band"] == "contact" and (sig["identity_confidence"] == "low" or sig["host_count"] == 1 or sig["operator_name_shape"]):
-        problems.append("capped account in contact")
+    if acc["band"] == "contact":
+        problems.append("account in contact (D10: only adjudication may promote)")
     return problems
 
 

@@ -113,11 +113,21 @@ class PointRuleTests(unittest.TestCase):
         self.assertEqual(score_one(sensitive_stack=True)["fit_score"], 20)
         self.assertEqual(score_one(in_territory=True, footprint_band=3, sensitive_stack=True)["fit_score"], 100)
 
-    def test_operator_penalty_t1_only(self):
-        """The fit penalty of 30 applies to operator_shape_t1 only; T2 alone does not reduce fit; clipped at 0."""
+    def test_operator_penalty_union(self):
+        """D10: the fit penalty of 30 applies to the T1-or-T2 union; a T2-only name loses fit points; one penalty when both fire; clipped at 0."""
         self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t1=True)["fit_score"], 50)
-        self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t2=True)["fit_score"], 80)
+        self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t2=True)["fit_score"], 50)
+        self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t1=True, operator_shape_t2=True)["fit_score"], 50)
+        self.assertEqual(score_one(in_territory=True, footprint_band=3)["fit_score"], 80)
+        self.assertEqual(score_one(footprint_band=1, operator_shape_t2=True)["fit_score"], 0)
         self.assertEqual(score_one(footprint_band=1, operator_shape_t1=True)["fit_score"], 0)
+
+    def test_union_penalty_lowers_contact_score(self):
+        """A T2-only operator scores lower contact than the same account without the flag (urgency 100: fit 80 gives 90, fit 50 gives 75)."""
+        full = dict(kev_exposed=True, risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, eol_stack=True,
+                    cert_expired_or_soon=True, legacy_tls=True, in_territory=True, footprint_band=3)
+        self.assertEqual(score_one(**full)["contact_score"], 90)
+        self.assertEqual(score_one(operator_shape_t2=True, **full)["contact_score"], 75)
 
 
 class ContactScoreTests(unittest.TestCase):
@@ -186,7 +196,7 @@ class BandTests(unittest.TestCase):
         self.assertEqual((accounts["b"]["contact_score"], accounts["b"]["band"]), (13, "skip"))
         self.assertEqual((accounts["c"]["contact_score"], accounts["c"]["band"]), (5, "skip"))
         accounts, _, _, _ = run_scores([sig("a", max_cvss_band=3, **base)], contact=20, review=10)
-        self.assertEqual(accounts["a"]["band"], "contact")
+        self.assertEqual((accounts["a"]["band_uncapped"], accounts["a"]["band"]), ("contact", "review"))  # D10: a would-be contact is held in review
         accounts, _, _, _ = run_scores([sig("a", max_cvss_band=3, **base)], contact=21, review=20)
         self.assertEqual(accounts["a"]["band"], "review")
         accounts, _, _, _ = run_scores([sig("a", max_cvss_band=3, **base)], contact=40, review=21)
@@ -217,24 +227,44 @@ class BandTests(unittest.TestCase):
                     cert_expired_or_soon=True, legacy_tls=True, **over)
 
     def test_each_cap_alone(self):
-        """Singleton, low confidence and operator shape each move a would-be contact to review with exactly their reason."""
+        """Every would-be contact gets operator_unverified; singleton, low confidence and operator shape add their own reason; all go to review."""
         rows = [sig("clean", **self.strong()),
                 sig("single", host_count=1, **self.strong()),
                 sig("low", identity_confidence="low", identity_source="cert_o", **self.strong()),
                 sig("oper", operator_shape_t2=True, **self.strong())]
         accounts, _, _, _ = run_scores(rows)
-        self.assertEqual((accounts["clean"]["band"], accounts["clean"]["cap_reasons"], accounts["clean"]["band_uncapped"]), ("contact", None, "contact"))
-        for cid, reason in (("single", "singleton"), ("low", "low_confidence"), ("oper", "operator_name_shape")):
+        expected = {"clean": "operator_unverified", "single": "operator_unverified,singleton", "low": "low_confidence,operator_unverified",
+                    "oper": "operator_name_shape,operator_unverified"}
+        for cid, reasons in expected.items():
             a = accounts[cid]
-            self.assertEqual((a["band_uncapped"], a["band"], a["cap_reasons"]), ("contact", "review", reason), cid)
-            self.assertEqual(a["final_band"], "review")
+            self.assertEqual((a["band_uncapped"], a["band"], a["cap_reasons"], a["final_band"]), ("contact", "review", reasons, "review"), cid)
+
+    def test_operator_unverified_on_would_be_contact_alone(self):
+        """A clean would-be contact is capped only by operator_unverified; band_uncapped stays contact; its contact_score is at or above X."""
+        a = score_one(**self.strong())
+        self.assertEqual((a["band_uncapped"], a["band"], a["cap_reasons"]), ("contact", "review", "operator_unverified"))
+        self.assertGreaterEqual(a["contact_score"], STAGE.THRESHOLD_CONTACT)
+
+    def test_operator_unverified_not_given_to_non_contacts_or_excluded(self):
+        """Review, skip and excluded accounts never carry operator_unverified, and an excluded would-be contact stays exclude."""
+        rows = [sig("r", max_cvss_band=3), sig("s", max_cvss_band=1), sig("e", noise_host_count=3, noise_host_share=0.6, host_count=2, **self.strong())]
+        accounts, _, _, _ = run_scores(rows)
+        for cid, band in (("r", "review"), ("s", "skip"), ("e", "exclude")):
+            self.assertEqual((accounts[cid]["band"], accounts[cid]["cap_reasons"]), (band, None), cid)
+        self.assertEqual(accounts["e"]["band_uncapped"], "exclude")
 
     def test_caps_together_sorted(self):
-        """All reasons that apply are listed, sorted and comma separated."""
+        """All reasons that apply are listed, sorted alphabetically and comma separated, with operator_unverified among them."""
         a = score_one(host_count=1, identity_confidence="low", identity_source="cert_o", operator_shape_t1=True, **self.strong())
-        self.assertEqual(a["cap_reasons"], "low_confidence,operator_name_shape,singleton")
+        self.assertEqual(a["cap_reasons"], "low_confidence,operator_name_shape,operator_unverified,singleton")
         a = score_one(host_count=1, operator_shape_t2=True, **self.strong())
-        self.assertEqual(a["cap_reasons"], "operator_name_shape,singleton")
+        self.assertEqual(a["cap_reasons"], "operator_name_shape,operator_unverified,singleton")
+        a = score_one(host_count=1, **self.strong())
+        self.assertEqual(a["cap_reasons"], "operator_unverified,singleton")
+        b = score_one(identity_confidence="low", identity_source="cert_o", operator_shape_t2=True, **self.strong())
+        for r in (a, b):
+            parts = r["cap_reasons"].split(",")
+            self.assertEqual(parts, sorted(parts))
 
     def test_caps_only_contact_to_review_never_to_skip(self):
         """A capped company below the contact threshold is not touched by caps: review stays review (no reason), skip stays skip."""
@@ -242,19 +272,21 @@ class BandTests(unittest.TestCase):
         self.assertEqual((accounts["r"]["band"], accounts["r"]["cap_reasons"]), ("review", None))
         self.assertEqual((accounts["s"]["band"], accounts["s"]["cap_reasons"], accounts["s"]["band_uncapped"]), ("skip", None, "skip"))
 
-    def test_no_capped_company_in_contact(self):
-        """Over a grid of cap flags and high urgency, no singleton, low-confidence or operator-shaped company has band contact."""
+    def test_no_account_in_contact(self):
+        """Over a grid of cap flags and high urgency, no account has band contact (D10), final_band equals band, and every would-be contact has the reason."""
         rows = []
         for i, (single, low, op) in enumerate(itertools.product((False, True), repeat=3)):
             over = dict(host_count=1 if single else 5, operator_shape_t2=op, **self.strong())
             if low:
                 over.update(identity_confidence="low", identity_source="cert_o")
             rows.append(sig(f"g{i}", **over))
+        rows.append(sig("weak", max_cvss_band=3))
         accounts, _, _, _ = run_scores(rows)
         for a in accounts.values():
-            capped = a["host_count"] == 1 or a["identity_confidence"] == "low"
-            if a["band"] == "contact":
-                self.assertFalse(capped)
+            self.assertNotEqual(a["band"], "contact", a)
+            self.assertEqual(a["final_band"], a["band"])
+            if a["band_uncapped"] == "contact":
+                self.assertIn("operator_unverified", a["cap_reasons"].split(","))
 
     def test_exclude_rule_edges(self):
         """Exclude needs noise_host_count >= 2 AND noise_host_share >= 0.5: count 1 vs 2 and share 0.49 vs 0.5."""
@@ -301,9 +333,17 @@ class WhyTests(unittest.TestCase):
         """Cap clauses, the no-signal sentence, the limited-exposure sentence for skip and the exclude sentence."""
         strong = dict(kev_exposed=True, kev_host_count=1, eol_stack=True, eol_host_count=1, risky_service_exposed=True, risky_non_ssh_exposed=True,
                       exposed_and_outdated=True, risky_ports=[3389], cert_expired_or_soon=True, cert_issue_host_count=1, legacy_tls=True, legacy_tls_host_count=1)
-        self.assertTrue(score_one(host_count=1, **strong)["why"].endswith("Only one host seen."))
-        self.assertTrue(score_one(identity_confidence="low", identity_source="cert_o", **strong)["why"].endswith("Named only by a TLS certificate."))
-        self.assertTrue(score_one(operator_shape_t1=True, **strong)["why"].endswith("Name looks like a network operator."))
+        clause = "Not yet checked that this is an end-user organisation, not a network operator."
+        self.assertEqual(STAGE.UNVERIFIED_CLAUSE, clause)
+        self.assertTrue(score_one(**strong)["why"].endswith(" " + clause))
+        for over, text in ((dict(host_count=1), "Only one host seen."), (dict(identity_confidence="low", identity_source="cert_o"), "Named only by a TLS certificate."),
+                           (dict(operator_shape_t1=True), "Name looks like a network operator.")):
+            why = score_one(**over, **strong)["why"]
+            self.assertTrue(why.endswith(f"{text} {clause}"), why)
+            self.assertEqual(sum(why.count(c) for _, c in STAGE.CAP_CLAUSES), 1, why)  # one existing cap clause plus the D10 clause
+        two = score_one(host_count=1, operator_shape_t2=True, **strong)["why"]
+        self.assertTrue(two.endswith(f"Name looks like a network operator. {clause}"), two)  # priority rule keeps one existing cap clause
+        self.assertNotIn(clause, score_one(max_cvss_band=3, max_cvss=9.8)["why"])  # a review account that is not a would-be contact
         self.assertEqual(score_one()["why"], "No exposure signal found in the scan (5 hosts seen).")
         self.assertEqual(score_one(host_count=1)["why"], "No exposure signal found in the scan (1 host seen).")
         self.assertTrue(score_one(max_cvss_band=1, max_cvss=3.0)["why"].endswith("Exposure is limited."))
@@ -340,6 +380,11 @@ class WhyTests(unittest.TestCase):
             self.assertNotIn("=", why)
             for word in ("breach", "compromised", "hacked"):
                 self.assertNotIn(word, why.lower())
+            if a["band_uncapped"] == "contact":
+                self.assertTrue(a["why"].endswith(STAGE.UNVERIFIED_CLAUSE), why)
+            else:
+                self.assertNotIn(STAGE.UNVERIFIED_CLAUSE, why)
+        self.assertTrue(any(a["band_uncapped"] == "contact" for a in accounts.values()))
         worst = max(len(a["why"].split()) for a in accounts.values())
         self.assertLessEqual(worst, 40)
 
