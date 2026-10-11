@@ -135,6 +135,14 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   added as a D2 prefix family (10 rows, 1 IP). (4) `INFRA_REASONS` pinned by a test: cloud_provider, tag_rule, ip_pattern, org_exact, org_prefix, org_pattern,
   org_keyword; `2_companies` is not built yet and must follow it. Spread sample: infrastructure 85,747 to 85,798 (85.80%), surviving 14,253 to 14,202 (14.20%),
   surviving distinct orgs 5,664 to 5,657; 106 tests pass. Details: `outputs/denylist_cleanup_review.md` section 7.
+- Update 2026-10-11, branch `feat/data-integrator/d6-denylist` (proposed; D6.4 and D6.7 decided by senior-data-engineer): (1) device-vendor, carrier and name-guard entries plus `dis` (10 rows of
+  self-signed mail-server template certs) added to `context/cert_default_names.txt`. (2) Gates on the spread sample: org prefixes facebook / meta platforms / netflix FAILED 0/4 by name
+  (not added; the 176 rows look like cache and edge nodes of the organisation itself, evidence outside the gate), `org: unicom` 46/47, `org: province network` 38/38, compound `org: *hosting` 30/30,
+  13 named operator or hosting prefixes (racknerd, ntt america, ionos, telstra, vodafone, fastweb, uninet, cliente antel, administracion nacional de telecomunicaciones, web com, psinet, comcast, cloudfly) 39/40.
+  (3) New matcher syntax: a leading `*` on a one-word keyword matches one token that ends with the word (webhosting, EGIHosting); not a substring match; `ghosting` excluded. (4) Spread sample:
+  infrastructure 85,798 to 86,583 (86.58%), surviving 14,202 to 13,417, surviving distinct orgs 5,657 to 5,539; top-50 surviving orgs that read as ISP, hosting or telecom by name 20 (538 rows) to 9 (171 rows);
+  207 tests pass. Residual stays: the operator long tail (True Internet, Taiwan Fixed Network, Orange, Rogers, IDC Frontier, Leaseweb) is above the D6.7 10% reopen threshold if it holds on the full run.
+  Details: `outputs/denylist_cleanup_review.md` section 8.
 - What remains: (1) 18 candidates failed the gate in the first round and are not applied, including communications (78.0%), isp, idc, fiber,
   mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
   but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr added (see the denylist-cleanup update). (4) The checker now enforces the shared rules (RAW-010 closed); `2_companies` is not built yet. (5) Not yet run on the full file.
