@@ -1,0 +1,234 @@
+# CyberIntel: AI Sales Intelligence Platform
+
+## 1. What this is
+A sales intelligence tool for a **cybersecurity software company**. It takes raw
+company/host data and answers: *which companies need our product right now, why,
+and how do we reach them first?*
+
+Output: a ranked account list. Each account has a score, a band
+(contact / review / skip / exclude), a plain-English `why` explanation, and an
+optional outreach draft.
+
+This is a take-home task for Firmable. Graders assess **how I build** as much as
+what I ship: skills, evals, tracing, prompt versioning, cost awareness, and
+rules used where rules are the right tool.
+
+## 2. Start of every session
+Read these first, before doing any task:
+1. `context/business.md` (who the buyer is, what they sell)
+2. `context/icp.md` (what a good account looks like)
+3. `context/schema.md` (columns of every data layer)
+4. `docs/BACKLOG.md` (what is done and what is next)
+
+Then run `git branch --show-current`. If on `dev` or `prod`, create a feature
+branch before changing anything (see section 7).
+
+## 3. Data flow
+```
+data/raw → pipeline/1_clean → data/silver/hosts.parquet
+        → pipeline/2_companies → data/silver/companies.parquet
+        → pipeline/3_signals   → data/gold/signals.parquet
+        → pipeline/4_score     → data/gold/accounts.parquet
+        → llm/adjudicate (review band only)
+        → app/streamlit_app.py
+```
+Each stage is ONE script. It reads the previous stage's file and writes its own.
+If a stage is wrong, rerun that stage only.
+
+## 4. Tech stack
+- Python 3.10+, DuckDB + Parquet for data processing
+- Anthropic API for LLM features (Haiku for classification, Sonnet for drafting)
+- Streamlit for the UI, hosted on Streamlit Community Cloud (deploys from `prod`)
+- Git/GitHub with protected `dev` and `prod` branches
+
+## 5. The team (subagents)
+The main Claude session is the orchestrator ("head of data"). It reads this file,
+picks the next task, and delegates to one agent at a time. Subagents cannot talk
+to each other. They hand work over through FILES (contracts, reports, PRs), and
+the main session routes between them.
+
+| Agent | Job | Level |
+|---|---|---|
+| `data-integrator` | Ingest raw data, profile it, document the schema | Junior |
+| `data-engineer` | Build pipeline stages (clean, companies, signals, score) | Junior |
+| `llm-engineer` | Prompts, `llm/client.py`, tracing, prompt versions, cost wrapper | Junior |
+| `app-developer` | Streamlit UI (uses `frontend-design` skill) | Junior |
+| `data-analyst` | Scoring calibration, band and segment analysis | Mid |
+| `data-quality-engineer` | Owns data contracts, runs data checks, owns `docs/ISSUES.md` | Mid |
+| `qa-engineer` | Unit tests, eval harness, regression runs. Tests code and LLM behaviour | Mid |
+| `security-reviewer` | Scans PRs for secrets, committed data, unsafe prompts, PII. Read-only | Reviewer |
+| `sales-team` | Simulated end user: usability feedback, outreach drafts. Not ground truth | Read-mostly |
+| `release-engineer` | Prepares the dev to prod promotion checklist | Senior-controlled |
+| `senior-data-engineer` | Reviews PRs, owns architecture and cost docs, recommends approve or changes | Senior |
+| `tech-writer` | Docs, README, reflection draft | Junior |
+
+Core set to build first: `data-engineer`, `llm-engineer`, `data-quality-engineer`,
+`qa-engineer`, `senior-data-engineer`, `sales-team`. Add the others only when a
+PR needs them.
+
+### Ownership rules
+- **Data correctness** belongs to `data-quality-engineer`. **Code and LLM
+  behaviour** belongs to `qa-engineer`. **Design and merge recommendation**
+  belongs to `senior-data-engineer`.
+- The author of a change never validates it. Reviewers never fix what they
+  review. They return PASS or FAIL with evidence.
+- Reviewer agents are read-only on pipeline code. `data-quality-engineer` may
+  write only to `context/contracts/`, `outputs/dq/`, `docs/ISSUES.md`, and its
+  own check scripts.
+- `sales-team` output is never used as eval ground truth.
+- Do not run agents in parallel on dependent stages. Parallel is fine only for
+  independent work (profiling column groups, docs while evals run).
+
+## 6. Folder map
+```
+.claude/
+  agents/        one .md per agent above
+  commands/      slash commands that call skills (/run-stage, /review-layer, /run-evals)
+  skills/        SKILL.md workflows (see list below)
+  hooks/         protect_files.py, branch_guard.py, log_changes.py, lint_check.py
+  logs/          changes.jsonl (every Claude edit/command; gitignored)
+  settings.json  permissions + hooks
+pyproject.toml   ruff config (naming + docstring rules)
+.github/         pull_request_template.md, CODEOWNERS
+context/         business, ICP, signal glossary, schema
+  contracts/     data contracts per layer (hosts, companies, signals, accounts)
+reference/       task brief, sample records, reference architecture notes
+scripts/         shared utilities (data download, helpers)
+data/            raw/ silver/ gold/  (gitignored, regenerated by pipeline)
+pipeline/        1_clean, 2_companies, 3_signals, 4_score
+llm/             client.py (the ONLY place that calls the API), adjudicate.py
+prompts/         versioned prompts: account_scoring/v1.md, v2.md, ...
+evals/           labeled.jsonl, run_eval.py, results/
+traces/          dev.jsonl, prod.jsonl (every LLM call)
+app/             streamlit_app.py
+outputs/         generated reports; outputs/dq/ holds data quality reports
+docs/            PLANNING, ARCHITECTURE, HOW_I_BUILD, ISSUES, BACKLOG
+```
+
+### Skills (each lives in `.claude/skills/<name>/SKILL.md`)
+Build the required ones first, add the rest when the workflow has been run by
+hand once.
+- Required: `data-profiling`, `pipeline-stage-build`, `data-quality-check`,
+  `scoring-calibration`, `account-scoring`, `outreach-draft`
+- Later: `data-contract`, `eval-run`, `prompt-version`, `cost-report`,
+  `entity-resolution`, `signal-engineering`, `architecture-review`
+- Skills may contain `references/` and `scripts/`. Only `SKILL.md` is mandatory.
+
+## 7. Git workflow and access
+```
+prod   protected. Hosted app deploys from here. Merge only via PR from dev.
+dev    protected. Integration and testing. Merge only via PR from feature branches.
+feat/<role>/<task>   where work happens, always branched from dev.
+```
+- NEVER commit, push, merge or rebase on `dev` or `prod`. Work on a feature branch.
+- Open PRs with `gh pr create --base dev` using the PR template.
+- Required checks on a PR into `dev`: data-quality-engineer PASS (when pipeline
+  or data is touched), qa-engineer PASS (when code or prompts are touched),
+  security-reviewer clean, senior-data-engineer recommendation.
+- Before dev to prod: data-quality-engineer PASS on the FULL dataset (not the
+  sample), evals not regressed, cost within ceiling, docs updated.
+- **AI agents open PRs and comment on them. A human merges**, especially into
+  `prod`. Agents never merge their own or another agent's PR.
+- No hotfixes straight to `prod`. Fixes go through `dev`.
+- Environments: dev uses the 100K sample and a small cost ceiling; prod uses the
+  full scored extract. Traces go to `traces/dev.jsonl` or `traces/prod.jsonl`.
+
+| Role group | Feature branch | PR to dev | Merge | Edit .env |
+|---|---|---|---|---|
+| Junior and mid agents | yes (own branch) | yes | no | no |
+| Reviewer agents (security, sales) | no | no | no | no |
+| release-engineer | no | prepares dev to prod PR | no | no |
+| senior-data-engineer | yes | yes | recommends only | no |
+| Human owner (me) | yes | yes | yes | yes |
+
+## 8. Rules and guardrails
+
+### Architecture
+- **Rules first.** Scoring, banding, filtering and entity grouping are
+  deterministic code (SQL/DuckDB/Python). The LLM is used ONLY for judgement on
+  the ambiguous "review" band, and for text generation (summaries, outreach).
+- Every account must have a `why` explanation a salesperson can read directly.
+- Prefer precision over recall when grouping rows into companies. Report the
+  unresolved percentage openly. Do not hide it.
+
+### LLM calls
+- ALL LLM calls go through `llm/client.py`. Never call the API anywhere else.
+- Every call is logged to `traces/<env>.jsonl` with: timestamp, request,
+  response, model, prompt_version, input_tokens, output_tokens, latency_ms,
+  cost_usd, decision, account_id.
+- Prompts live in `prompts/<feature>/vN.md`. Never inline prompt text in code.
+  New prompt = new version file. Never overwrite an old version.
+- Use the cheapest model that works: Haiku for classification, Sonnet for drafting.
+- Enforce a per-run cost ceiling in code. Abort if exceeded.
+- LLM output must be validated JSON. Retry once on failure, then mark `needs_human`.
+
+### Data and pipeline
+- Develop on a SAMPLE (100K rows) first. Run the full dataset only after the
+  sample output has been checked.
+- After EVERY stage print: row count, null rates for key columns, and 5 random
+  sample rows. Compare row count to the previous layer and explain differences.
+- A pipeline that runs without errors can still be wrong. Verify outputs.
+
+### Data quality
+- Every layer has a contract in `context/contracts/<layer>.yml` (columns, types,
+  key uniqueness, allowed ranges). `data-quality-check` runs against it.
+- Always check: `companies <= hosts`; signals row count equals companies row
+  count (join fan-out); no hyperscaler, CDN or ISP names as companies (denylist
+  leakage); scores within 0 to 100; every account has a band and a non-empty `why`.
+- Every bug found goes into `docs/ISSUES.md` with symptom, root cause, fix, and
+  the contract rule that now catches it.
+- Quality reports are saved to `outputs/dq/<layer>_<date>.md`.
+
+### Code style (enforced by `.claude/hooks/lint_check.py` and ruff)
+- Every function and class has a ONE-LINE docstring saying what it does.
+- Naming: `snake_case` for files, functions, variables; `PascalCase` for classes;
+  `UPPER_SNAKE` for constants. Pipeline stages are `N_name.py` (`1_clean.py`).
+  Prompts are `prompts/<feature>/vN.md`. Branches are `feat/<role>/<task>`.
+- Use the same name for the same concept across all layers (e.g. `company_id`,
+  `account_id`). Do not invent synonyms.
+- Fix hook feedback before moving on. Do not silence the linter.
+
+### Safety
+- NEVER edit or print `.env`. Never commit `.env`, `data/`, or `traces/`.
+- Enforced by `.claude/settings.json` (deny rules) and hooks `protect_files.py`
+  and `branch_guard.py`. If a hook blocks you, stop and tell me; do not work
+  around it.
+- Every edit and shell command is logged to `.claude/logs/changes.jsonl`
+  (local, gitignored) by `log_changes.py`.
+- NEVER modify files in `data/raw/`.
+- Don't add MCP servers. They are not needed and cost context.
+- Don't create files outside the folder map without asking.
+
+## 9. Evals
+- The labelled set (`evals/labeled.jsonl`, 20 to 30 examples) is labelled BY ME.
+  Claude may suggest candidate labels with reasoning, but the final label is
+  mine. Do not overwrite labels.
+- `python evals/run_eval.py --prompt v2 --baseline v1` prints precision, recall,
+  and a comparison against the previous prompt version, and saves to
+  `evals/results/`.
+
+## 10. Working style
+- Use plan mode for anything with multiple steps. Show the plan before building.
+- Spec, then to-do per milestone, then build one milestone at a time.
+- One task per prompt. Keep changes small and reviewable.
+- Run `/context` when a session gets long. Suggest `/clear` between unrelated tasks.
+- Commit after each working step, on a feature branch.
+- When something fails, show me the error and the root cause before fixing.
+- Keep a running note of where AI saved time and where it cost time, for
+  `docs/HOW_I_BUILD.md`.
+
+## 11. Data notes (fill in after data exploration)
+- Source: <describe the dataset, format, size>
+- Rows / columns: <fill in>
+- Key columns for FIT signals: <fill in>
+- Key columns for URGENCY / risk signals: <fill in>
+- Known data-quality issues: <fill in>
+- Denylist candidates (most frequent org/ISP/CDN values): <fill in>
+
+## 12. Scoring model (fill in after signals are approved)
+- `fit_score` (0-100): <signals and weights>
+- `urgency_score` (0-100): <signals and weights>
+- `contact_score` = <formula>
+- Bands: contact >= <X>, review <Y-X>, skip < <Y>, exclude = <rule>
+- Weights and thresholds are calibrated against my own score distribution and
+  documented in `docs/ARCHITECTURE.md`. Do not copy them from another project.

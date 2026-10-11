@@ -1,0 +1,7 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/F/W = pycodestyle + pyflakes, N = pep8-naming, D102/D103 = missing docstrings
+select = ["E", "F", "W", "N", "D102", "D103"]
