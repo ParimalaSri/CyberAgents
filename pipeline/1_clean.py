@@ -15,6 +15,7 @@ OUTPUT_PATH = ROOT / "data" / "silver" / "hosts.parquet"
 FULL_OUTPUT_PATH = ROOT / "data" / "silver" / "hosts_full.parquet"  # prod output: a full run must never overwrite the sample file (2_companies --full reads this)
 REPORT_SCRIPT = ROOT / ".claude" / "skills" / "pipeline-stage-build" / "scripts" / "stage_report.py"
 MATCHER_PATH = ROOT / "scripts" / "denylist_match.py"
+GUARD_SCRIPT = ROOT / "scripts" / "path_guard.py"
 
 MAX_OBJECT_SIZE = 33554432  # RAW-009
 NOISE_TAGS = ("honeypot", "c2", "tor", "compromised")  # D4 rule 1
@@ -56,6 +57,14 @@ KEY_COLUMNS = (
     "host_ip", "port", "transport", "timestamp", "org", "org_norm", "country_code", "product", "cloud_provider",
     "cert_expires", "cert_subject_o", "max_cvss", "is_noise", "is_infrastructure", "infra_reason", "identity_source", "name_norm",
 )
+
+
+def load_guard():
+    """Import the shared output-path guard from scripts/ by file path (it is not a package)."""
+    spec = importlib.util.spec_from_file_location("path_guard", GUARD_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def load_matcher():
@@ -200,6 +209,7 @@ def build_flagged(con, rules):
 def dedupe_and_select(con):
     """Build table out: one row per (host_ip, port, transport), latest timestamp kept, ties broken by a row hash."""
     names = ", ".join(name for name, _ in OUTPUT_COLUMNS if name not in ("name_norm",))
+    row_cols = ", ".join(name for name, _ in OUTPUT_COLUMNS if name not in ("name_norm", "dup_count", "timestamp"))  # total tie-break: every other kept column (QA finding 1)
     con.execute(
         f"""
         CREATE OR REPLACE TABLE out AS
@@ -208,7 +218,7 @@ def dedupe_and_select(con):
         FROM (
             SELECT *, count(*) OVER (PARTITION BY host_ip, port, transport)::INTEGER AS dup_count, row_number() OVER (
                 PARTITION BY host_ip, port, transport
-                ORDER BY timestamp DESC NULLS LAST, hash(org, isp, product, version, shodan_module, cert_subject_o, cast(tags AS VARCHAR)) DESC
+                ORDER BY timestamp DESC NULLS LAST, hash({row_cols}) DESC
             ) AS rn
             FROM flagged
         ) WHERE rn = 1
@@ -238,10 +248,15 @@ def run_stage(con, input_path, output_path, compressed=False):
     return {"raw_rows": raw_rows, "no_host_ip": raw_rows - flagged_rows, "flagged_rows": flagged_rows, "out_rows": out_rows}
 
 
+def percent(part, whole):
+    """Return part as a percentage of whole, 0.0 when whole is 0."""
+    return 100 * part / whole if whole else 0.0
+
+
 def share_table(con, table, column, total):
     """Return (value, rows, percent) triples for a categorical column of a table, largest first."""
     rows = con.execute(f"SELECT coalesce({column}, '(none)'), count(*) FROM {table} GROUP BY 1 ORDER BY 2 DESC, 1").fetchall()
-    return [(value, n, 100 * n / total) for value, n in rows]
+    return [(value, n, percent(n, total)) for value, n in rows]
 
 
 def print_flag_report(con, counts):
@@ -250,8 +265,8 @@ def print_flag_report(con, counts):
     pre = counts["flagged_rows"]
     infra = con.execute("SELECT count(*) FROM out WHERE is_infrastructure").fetchone()[0]
     infra_pre = con.execute("SELECT count(*) FROM flagged WHERE is_infrastructure").fetchone()[0]
-    print(f"\ninfrastructure rows: {infra:,} of {total:,} = {100 * infra / total:.2f}% (before dedupe {infra_pre:,} of {pre:,} = {100 * infra_pre / pre:.2f}%)")
-    print(f"surviving (not infrastructure): {total - infra:,} = {100 * (total - infra) / total:.2f}%")
+    print(f"\ninfrastructure rows: {infra:,} of {total:,} = {percent(infra, total):.2f}% (before dedupe {infra_pre:,} of {pre:,} = {percent(infra_pre, pre):.2f}%)")
+    print(f"surviving (not infrastructure): {total - infra:,} = {percent(total - infra, total):.2f}%")
     print("\ninfra_reason (after dedupe | before dedupe):")
     before = {v: n for v, n, _ in share_table(con, "flagged", "infra_reason", pre)}
     for value, n, pct in share_table(con, "out", "infra_reason", total):
@@ -262,7 +277,7 @@ def print_flag_report(con, counts):
         print(f"  {value:<26} {n:>8,} {pct:>6.2f}%")
     print(f"  sum of shares: {sum(pct for _, _, pct in shares):.2f}%")
     noise = con.execute("SELECT count(*) FROM out WHERE is_noise").fetchone()[0]
-    print(f"is_noise rows: {noise:,} ({100 * noise / total:.2f}%)")
+    print(f"is_noise rows: {noise:,} ({percent(noise, total):.2f}%)")
     dup_extra = con.execute("SELECT coalesce(sum(dup_count - 1), 0) FROM out").fetchone()[0]
     removed = pre - total
     print(f"sum(dup_count - 1) over kept rows: {dup_extra:,}; rows removed by dedupe: {removed:,}; equal: {dup_extra == removed}")
@@ -316,8 +331,11 @@ def main():
     parser.add_argument("--input", help="override the input JSON lines path")
     parser.add_argument("--output", help="output parquet path (default: hosts.parquet, or hosts_full.parquet with --full)")
     args = parser.parse_args()
+    guard = load_guard()
+    guard.use_utf8_output()
     input_path = args.input or (FULL_PATH if args.full else str(SAMPLE_PATH))
     output_path = resolve_output(args.output, args.full)
+    guard.check_output_path(output_path)
     compressed = args.full or str(input_path).endswith(".zst")
     con = duckdb.connect()
     counts = run_stage(con, input_path, output_path, compressed)

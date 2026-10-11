@@ -13,6 +13,7 @@ FULL_HOSTS_PATH = ROOT / "data" / "silver" / "hosts_full.parquet"  # prod input:
 OUTPUT_PATH = ROOT / "data" / "silver" / "companies.parquet"
 FULL_OUTPUT_PATH = ROOT / "data" / "silver" / "companies_full.parquet"
 REPORT_DIR = ROOT / "outputs" / "dq"
+GUARD_SCRIPT = ROOT / "scripts" / "path_guard.py"
 REPORT_SCRIPT = ROOT / ".claude" / "skills" / "pipeline-stage-build" / "scripts" / "stage_report.py"
 
 MEMBER_SOURCES = ("org", "cert_o")  # D8.3: only these identity_source values create companies
@@ -32,6 +33,14 @@ OUTPUT_COLUMNS = (
     ("noise_host_count", "INTEGER"), ("noise_host_share", "DOUBLE"),
 )
 KEY_COLUMNS = tuple(name for name, _ in OUTPUT_COLUMNS)
+
+
+def load_guard():
+    """Import the shared output-path guard from scripts/ by file path (it is not a package)."""
+    spec = importlib.util.spec_from_file_location("path_guard", GUARD_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def quote_path(path):
@@ -163,7 +172,7 @@ def section_headline(con, rep, total):
     rep.add(f"## 1. Headline\n\n**{pct(total - resolved, total)} of scanned services cannot be attributed to a customer** "
             f"({total - resolved:,} of {total:,} hosts rows are not org or cert_o: infrastructure_unresolved, noise or null_org).")
     rep.add(f"Resolved (org + cert_o): {resolved:,} of {total:,} = {pct(resolved, total)}. Resolved share range check {RESOLVED_SHARE_RANGE[0]}% to "
-            f"{RESOLVED_SHARE_RANGE[1]}%: {'inside' if RESOLVED_SHARE_RANGE[0] <= 100 * resolved / total <= RESOLVED_SHARE_RANGE[1] else 'OUTSIDE'}.")
+            f"{RESOLVED_SHARE_RANGE[1]}%: {'inside' if RESOLVED_SHARE_RANGE[0] <= 100 * resolved / max(total, 1) <= RESOLVED_SHARE_RANGE[1] else 'OUTSIDE'}.")
     rep.add("\n## 2. Rows and distinct host_ip per identity_source\n")
     ranks = " ".join(f"WHEN '{s}' THEN {i}" for i, s in enumerate(D4_PRECEDENCE))
     ip_first = dict(con.execute(
@@ -177,7 +186,7 @@ def section_headline(con, rep, total):
     rep.table(("identity_source", "rows", "row share", "distinct IPs (D4 precedence)", "IP share", "distinct IPs (raw)"),
               [(s, f"{rows.get(s, 0):,}", pct(rows.get(s, 0), total), f"{ip_first.get(s, 0):,}", pct(ip_first.get(s, 0), total_ips),
                 f"{ip_raw.get(s, 0):,}") for s in IDENTITY_SOURCES])
-    rep.add(f"\nRow shares sum to {100 * sum(rows.values()) / total:.2f}% (asserted); precedence IP shares sum to {100 * sum(ip_first.values()) / total_ips:.2f}% "
+    rep.add(f"\nRow shares sum to {100 * sum(rows.values()) / max(total, 1):.2f}% (asserted); precedence IP shares sum to {100 * sum(ip_first.values()) / max(total_ips, 1):.2f}% "
             f"(asserted). Distinct host_ip overall: {total_ips:,}. IPs present in more than one identity_source: {multi:,}.")
     return rows
 
@@ -205,7 +214,7 @@ def section_companies(con, rep, total):
     both = con.execute("SELECT count(*), coalesce(sum(org_host_count), 0), coalesce(sum(cert_o_host_count), 0) FROM companies "
                        "WHERE org_host_count > 0 AND cert_o_host_count > 0").fetchone()
     rep.add(f"\nCompanies named under both sources (merged): {both[0]:,} ({both[1]:,} org rows + {both[2]:,} cert_o rows).")
-    members = con.execute("SELECT sum(host_count) FROM companies").fetchone()[0]
+    members = con.execute("SELECT coalesce(sum(host_count), 0) FROM companies").fetchone()[0]
     rep.add("\n## 5. Host-count distribution per company\n")
     rows = []
     for label, low, high in BUCKETS:
@@ -307,13 +316,20 @@ def main():
     parser.add_argument("--full", action="store_true", help="read the full-run hosts file (not for dev)")
     parser.add_argument("--input", help="override the input hosts parquet path")
     parser.add_argument("--output", help="override the output companies parquet path")
+    parser.add_argument("--report", help="report markdown path (default: outputs/dq for the default output, else next to --output)")
     args = parser.parse_args()
+    guard = load_guard()
+    guard.use_utf8_output()
     hosts_path = args.input or (FULL_HOSTS_PATH if args.full else HOSTS_PATH)
     output_path = args.output or (FULL_OUTPUT_PATH if args.full else OUTPUT_PATH)
     report_name = f"companies_stage_{'full_' if args.full else ''}{datetime.date.today().isoformat()}.md"
+    default_output = FULL_OUTPUT_PATH if args.full else OUTPUT_PATH
+    report_path = guard.choose_report_path(output_path, default_output, args.report, REPORT_DIR / report_name, "companies")
+    guard.check_output_path(output_path)
+    guard.check_output_path(report_path)
     con = duckdb.connect()
     run_stage(con, hosts_path, output_path)
-    print_report(con, output_path, REPORT_DIR / report_name)
+    print_report(con, output_path, report_path)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,9 @@
 """Unit tests for pipeline/2_companies.py on a tiny synthetic hosts parquet (stdlib unittest, no pandas)."""
 import hashlib
 import importlib.util
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -202,6 +205,105 @@ class CompaniesStageTests(unittest.TestCase):
         self.assertNotEqual(STAGE.FULL_OUTPUT_PATH, STAGE.OUTPUT_PATH)
         source = STAGE_PATH.read_text(encoding="utf-8")
         self.assertIn('"--full"', source)
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def run_cli(args, env=None):
+    """Run the stage script as a subprocess and return the completed process (text output, UTF-8 decoded)."""
+    return subprocess.run([sys.executable, str(STAGE_PATH), *map(str, args)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=dict(os.environ, **(env or {})))
+
+
+def dq_listing(prefix):
+    """Return (name, mtime) pairs of the committed stage reports so a test can prove they were not touched."""
+    dq = ROOT_DIR / "outputs" / "dq"
+    return sorted((f.name, f.stat().st_mtime_ns) for f in dq.glob(prefix + "_stage_*.md")) if dq.exists() else []
+
+HOSTS_CLI_DDL = ("host_ip VARCHAR, port BIGINT, org VARCHAR, org_norm VARCHAR, country_code VARCHAR, cert_subject_o VARCHAR, is_noise BOOLEAN, "
+                 "identity_source VARCHAR, name_norm VARCHAR, is_infrastructure BOOLEAN, infra_reason VARCHAR")
+
+
+def write_hosts(path, rows):
+    """Write host tuples (the run_hosts shape plus infra flags) as a hosts parquet with the columns the report reads."""
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE h ({HOSTS_CLI_DDL})")
+    for row in rows:
+        infra = row[7] == "infrastructure_unresolved"
+        con.execute("INSERT INTO h VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [*row, infra, "org_exact" if infra else None])
+    con.execute(f"COPY h TO '{Path(path).as_posix()}' (FORMAT PARQUET)")
+
+
+class CliRobustnessTests(unittest.TestCase):
+    """QA findings 2, 3, 7, 8 for the companies stage: zero rows, report path, UTF-8 report, output path guard."""
+
+    def run_hosts_cli(self, rows, env=None):
+        """Run the CLI on a hosts file made from rows; return (process, company rows or None, report path next to the output)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "hosts.parquet"), Path(tmp, "companies.parquet")
+            write_hosts(src, rows)
+            result = run_cli(["--input", src, "--output", out], env=env)
+            count = duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{out.as_posix()}')").fetchone()[0] if out.exists() else None
+            return result, count, Path(tmp, "companies_stage_report.md").exists()
+
+    def test_zero_row_batches_complete(self):
+        """Empty, all-noise, all-infrastructure and all-null-org hosts files complete with exit code 0 and zero companies."""
+        cases = {
+            "empty": [],
+            "noise": [host(f"1.1.1.{i}", noise=True, source="noise", norm=f"n{i}") for i in range(3)],
+            "infra": [host(f"1.1.1.{i}", org=f"Cloudy {i}", norm=f"cloudy {i}", source="infrastructure_unresolved", name="") for i in range(3)],
+            "null_org": [host(f"1.1.1.{i}", source="null_org") for i in range(3)],
+        }
+        for name, rows in cases.items():
+            result, count, has_report = self.run_hosts_cli(rows)
+            self.assertEqual((result.returncode, count, has_report), (0, 0, True), (name, result.stderr[-500:]))
+        self.assertIn("rows: 0", self.run_hosts_cli([])[0].stdout)
+
+    def test_zero_member_reconciliation_arithmetic(self):
+        """With no companies the reconciliation still asserts sum(host_count) = member rows (0 = 0)."""
+        result, _, _ = self.run_hosts_cli([host("1.1.1.1", source="null_org")])
+        self.assertIn("sum(host_count) = 0 equals member rows (asserted)", result.stdout)
+
+    def test_report_goes_next_to_scratch_output(self):
+        """With a non-default --output and no --report the report sits beside the output; --report overrides; the committed reports are untouched."""
+        before = dq_listing("companies")
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "hosts.parquet"), Path(tmp, "sub", "companies.parquet")
+            write_hosts(src, [host("1.1.1.1", org="Acme", norm="acme")])
+            self.assertEqual(run_cli(["--input", src, "--output", out]).returncode, 0)
+            self.assertTrue(Path(tmp, "sub", "companies_stage_report.md").exists())
+            custom = Path(tmp, "elsewhere", "my_report.md")
+            self.assertEqual(run_cli(["--input", src, "--output", out, "--report", custom]).returncode, 0)
+            self.assertTrue(custom.exists())
+        self.assertEqual(before, dq_listing("companies"))
+
+    def test_default_output_keeps_committed_report_path(self):
+        """With the default output the report path is the committed outputs/dq path."""
+        guard = STAGE.load_guard()
+        default_report = STAGE.REPORT_DIR / "companies_stage_2026-01-01.md"
+        self.assertEqual(guard.choose_report_path(str(STAGE.OUTPUT_PATH), STAGE.OUTPUT_PATH, None, default_report, "companies"), default_report)
+
+    def test_cjk_name_under_cp1252_pipe(self):
+        """A CJK company name does not break the report under the default Windows pipe encoding."""
+        name = "\u682a\u5f0f\u4f1a\u793e\u30c6\u30b9\u30c8"
+        result, count, _ = self.run_hosts_cli([host("1.1.1.1", org=name, norm=name)], env={"PYTHONIOENCODING": "cp1252"})
+        self.assertEqual((result.returncode, count), (0, 1), result.stderr[-500:])
+
+    def test_output_under_raw_or_dataset_folder_refused(self):
+        """Outputs under data/raw (plain, with .., upper case) and under the dataset folder are refused and nothing is written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "hosts.parquet")
+            write_hosts(src, [host("1.1.1.1", org="Acme", norm="acme")])
+            targets = [ROOT_DIR / "data" / "raw" / "qa_guard_test.parquet",
+                       str(ROOT_DIR / "data" / "silver" / ".." / "raw" / "qa_guard_test.parquet"),
+                       str(ROOT_DIR / "DATA" / "RAW" / "qa_guard_test.parquet"),
+                       "D:/Cyber_DataSet/qa_guard_test.parquet", "d:/CYBER_DATASET/sub/../qa_guard_test.parquet"]
+            for target in targets:
+                result = run_cli(["--input", src, "--output", target])
+                self.assertNotEqual(result.returncode, 0, str(target))
+                self.assertIn("refusing to write", result.stderr, str(target))
+                self.assertFalse(Path(target).exists(), str(target))
 
 
 if __name__ == "__main__":

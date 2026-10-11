@@ -1,7 +1,11 @@
 """Unit tests for pipeline/1_clean.py on a tiny synthetic JSONL (stdlib unittest, no pandas)."""
 import importlib.util
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import itertools
 import unittest
 from pathlib import Path
 
@@ -253,6 +257,115 @@ class CleanStageTests(unittest.TestCase):
         self.assertEqual(Path(STAGE.resolve_output(None, False)).name, "hosts.parquet")
         self.assertNotEqual(STAGE.resolve_output(None, True), STAGE.resolve_output(None, False))
         self.assertEqual(STAGE.resolve_output("x/y.parquet", True), "x/y.parquet")
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def run_cli(args, env=None):
+    """Run the stage script as a subprocess and return the completed process (text output, UTF-8 decoded)."""
+    return subprocess.run([sys.executable, str(STAGE_PATH), *map(str, args)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=dict(os.environ, **(env or {})))
+
+
+def cert_row(port, expires, issued):
+    """Return a raw row with a certificate carrying the two date strings."""
+    return make_row(port=port, ssl={"cert": {"expires": expires, "issued": issued, "expired": False, "subject": {"O": None, "CN": None}}, "versions": None})
+
+
+class QaFixTests(unittest.TestCase):
+    """QA findings 1, 5, 6: total dedupe tie-break, certificate year edges and the vuln cap pinned with literal values."""
+
+    def test_dedupe_tie_total_over_every_column(self):
+        """Rows with the same key and timestamp that differ only in vulns or hostnames give one output for all 6 input orders."""
+        a = make_row(vulns={"CVE-1": {"cvss": 9.8, "kev": True}}, hostnames=["a.example"])
+        b = make_row(vulns={"CVE-2": {"cvss": 2.0, "kev": False}}, hostnames=["b.example"])
+        c = make_row(vulns={"CVE-3": {"cvss": 5.0, "kev": False}, "CVE-4": {"cvss": 1.0, "kev": False}}, hostnames=None, domains=["z.example"])
+        outputs = set()
+        for order in itertools.permutations([a, b, c]):
+            rows, _, _ = run_rows(list(order))
+            self.assertEqual(len(rows), 1)
+            outputs.add((rows[0]["max_cvss"], rows[0]["has_kev"], rows[0]["vuln_count"], str(rows[0]["hostnames"]), str(rows[0]["domains"])))
+        self.assertEqual(len(outputs), 1, outputs)
+
+    def test_dedupe_tie_total_for_same_hash_columns_different_other_fields(self):
+        """Rows that agree on org, isp, product, version, module, cert O and tags but differ in cert dates or country still tie-break identically."""
+        a = make_row(location={"country_code": "DE"}, ssl={"cert": {"expires": "20300101000000Z", "issued": "20200101000000Z", "expired": False, "subject": {"O": None, "CN": "x"}}, "versions": None})
+        b = make_row(location={"country_code": "FR"}, ssl={"cert": {"expires": "20310101000000Z", "issued": "20210101000000Z", "expired": False, "subject": {"O": None, "CN": "y"}}, "versions": None})
+        first, _, _ = run_rows([a, b])
+        second, _, _ = run_rows([b, a])
+        self.assertEqual((first[0]["country_code"], first[0]["cert_subject_cn"]), (second[0]["country_code"], second[0]["cert_subject_cn"]))
+
+    def test_certificate_year_edges(self):
+        """Years 1990 and 2100 are kept; 1989 and 2101 are nulled and flagged invalid."""
+        rows, _, _ = run_rows([
+            cert_row(1, "19900101000000Z", "19900101000000Z"), cert_row(2, "21001231235959Z", "21001231235959Z"),
+            cert_row(3, "19891231235959Z", "19891231235959Z"), cert_row(4, "21010101000000Z", "21010101000000Z"),
+        ])
+        by_port = {r["port"]: r for r in rows}
+        self.assertEqual((by_port[1]["cert_expires"].year, by_port[1]["cert_issued"].year, by_port[1]["cert_date_invalid"]), (1990, 1990, False))
+        self.assertEqual((by_port[2]["cert_expires"].year, by_port[2]["cert_issued"].year, by_port[2]["cert_date_invalid"]), (2100, 2100, False))
+        self.assertEqual((by_port[3]["cert_expires"], by_port[3]["cert_issued"], by_port[3]["cert_date_invalid"]), (None, None, True))
+        self.assertEqual((by_port[4]["cert_expires"], by_port[4]["cert_issued"], by_port[4]["cert_date_invalid"]), (None, None, True))
+
+    def test_vuln_cap_literal_values(self):
+        """The vuln count is 49 for 49 CVEs, 50 for 50 and 51 and 5000 (cap pinned at 50, not read from the constant)."""
+        def vulns(n):
+            """Return n synthetic CVE entries."""
+            return {f"CVE-2020-{i}": {"cvss": 5.0, "kev": False} for i in range(n)}
+        rows, _, _ = run_rows([make_row(port=1, vulns=vulns(49)), make_row(port=2, vulns=vulns(50)), make_row(port=3, vulns=vulns(51)),
+                               make_row(port=4, vulns=vulns(5000))])
+        self.assertEqual({r["port"]: r["vuln_count"] for r in rows}, {1: 49, 2: 50, 3: 50, 4: 50})
+
+
+class CliRobustnessTests(unittest.TestCase):
+    """QA findings 2, 7, 8 for the clean stage: zero rows, UTF-8 report under cp1252, output path guard."""
+
+    def run_lines(self, lines, env=None):
+        """Run the stage CLI on the given JSON lines; return (process, output path, rows in the output)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "in.jsonl"), Path(tmp, "out.parquet")
+            src.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in lines), encoding="utf-8")
+            result = run_cli(["--input", src, "--output", out], env=env)
+            rows = duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{out.as_posix()}')").fetchone()[0] if out.exists() else None
+            return result, rows
+
+    def test_empty_input_file(self):
+        """An empty input file completes with exit code 0 and a zero-row output and report."""
+        result, rows = self.run_lines([])
+        self.assertEqual((result.returncode, rows), (0, 0), result.stderr[-500:])
+        self.assertIn("rows: 0", result.stdout)
+
+    def test_all_noise_all_infrastructure_and_null_org(self):
+        """Inputs that are all noise, all infrastructure or all blank-org complete with exit code 0."""
+        cases = {
+            "noise": [make_row(ip_str=f"8.8.4.{i}", tags=["honeypot"]) for i in range(1, 4)],
+            "infra": [make_row(ip_str=f"8.8.4.{i}", tags=["cloud"], cloud={"provider": "aws"}) for i in range(1, 4)],
+            "null_org": [make_row(ip_str="8.8.4.1", org=None), make_row(ip_str="8.8.4.2", org=""), make_row(ip_str="8.8.4.3", org="   ")],
+        }
+        for name, lines in cases.items():
+            result, rows = self.run_lines(lines)
+            self.assertEqual((result.returncode, rows), (0, 3), (name, result.stderr[-500:]))
+
+    def test_cjk_org_under_cp1252_pipe(self):
+        """A CJK org name does not break the report under the default Windows pipe encoding."""
+        result, rows = self.run_lines([make_row(org="\u682a\u5f0f\u4f1a\u793e\u30c6\u30b9\u30c8")], env={"PYTHONIOENCODING": "cp1252"})
+        self.assertEqual((result.returncode, rows), (0, 1), result.stderr[-500:])
+
+    def test_output_under_raw_or_dataset_folder_refused(self):
+        """Outputs under data/raw (plain, with .., upper case) and under the dataset folder are refused and nothing is written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "in.jsonl")
+            src.write_text(json.dumps(make_row()) + "\n", encoding="utf-8")
+            targets = [ROOT_DIR / "data" / "raw" / "qa_guard_test.parquet",
+                       str(ROOT_DIR / "data" / "silver" / ".." / "raw" / "qa_guard_test.parquet"),
+                       str(ROOT_DIR / "DATA" / "RAW" / "qa_guard_test.parquet"),
+                       "D:/Cyber_DataSet/qa_guard_test.parquet", "d:/CYBER_DATASET/sub/../qa_guard_test.parquet"]
+            for target in targets:
+                result = run_cli(["--input", src, "--output", target])
+                self.assertNotEqual(result.returncode, 0, str(target))
+                self.assertIn("refusing to write", result.stderr, str(target))
+                self.assertFalse(Path(target).exists(), str(target))
 
 
 if __name__ == "__main__":

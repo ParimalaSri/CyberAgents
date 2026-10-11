@@ -1,6 +1,9 @@
 """Unit tests for pipeline/3_signals.py on tiny synthetic hosts and companies parquet files (stdlib unittest, DuckDB, no pandas)."""
 import datetime
 import importlib.util
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -318,6 +321,108 @@ class SignalStageTests(unittest.TestCase):
             con.execute(f"COPY c TO '{Path(tmp, 'c.parquet').as_posix()}' (FORMAT PARQUET)")
             with self.assertRaises(AssertionError):
                 STAGE.run_stage(con, Path(tmp, "h.parquet"), Path(tmp, "c.parquet"), Path(tmp, "o.parquet"))
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def run_cli(args, env=None):
+    """Run the stage script as a subprocess and return the completed process (text output, UTF-8 decoded)."""
+    return subprocess.run([sys.executable, str(STAGE_PATH), *map(str, args)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=dict(os.environ, **(env or {})))
+
+
+def dq_listing(prefix):
+    """Return (name, mtime) pairs of the committed stage reports so a test can prove they were not touched."""
+    dq = ROOT_DIR / "outputs" / "dq"
+    return sorted((f.name, f.stat().st_mtime_ns) for f in dq.glob(prefix + "_stage_*.md")) if dq.exists() else []
+
+
+def write_inputs(tmp, hosts, companies):
+    """Write hosts dicts (run_signals shape) and company tuples (company_id, name, name_norm, host_count) as the two input parquet files."""
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE h ({HOST_DDL})")
+    for i, row in enumerate(hosts):
+        row = dict(row, host_ip=row.get("host_ip", f"10.0.0.{i}"))
+        con.execute("INSERT INTO h VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", [row[k] for k in HOST_ORDER])
+    con.execute(f"COPY h TO '{Path(tmp, 'hosts.parquet').as_posix()}' (FORMAT PARQUET)")
+    con.execute(f"CREATE TABLE c ({COMPANY_DDL})")
+    for cid, name, norm, count in companies:
+        con.execute("INSERT INTO c VALUES (?,?,?,?,?,?,?,?,?,?)", [cid, name, norm, "org", "high", count, count, "US", 0, 0.0])
+    con.execute(f"COPY c TO '{Path(tmp, 'companies.parquet').as_posix()}' (FORMAT PARQUET)")
+    return Path(tmp, "hosts.parquet"), Path(tmp, "companies.parquet")
+
+
+class PinnedSpecTests(unittest.TestCase):
+    """QA finding 6: the risky-port list pinned with literal values, not read from the constant."""
+
+    def test_risky_port_list_literal(self):
+        """Exactly the D9.4 ports are risky over tcp: 22, 3389, 445, 3306, 6379, 27017, 9200, 5900, 23 and 2375; nothing else tested is."""
+        for port in (22, 3389, 445, 3306, 6379, 27017, 9200, 5900, 23, 2375):
+            self.assertTrue(one(port=port)["risky_service_exposed"], port)
+            self.assertEqual(one(port=port)["risky_non_ssh_exposed"], port != 22, port)
+        for port in (21, 25, 80, 110, 443, 2376, 3307, 6380, 8080, 27018, 9201, 5901, 24, 2374, 1433, 5432, 11211):
+            self.assertFalse(one(port=port)["risky_service_exposed"], port)
+        self.assertEqual(sorted(STAGE.RISKY_PORTS), [22, 23, 445, 2375, 3306, 3389, 5900, 6379, 9200, 27017])
+
+
+class CliRobustnessTests(unittest.TestCase):
+    """QA findings 2, 3, 7, 8 for the signals stage: zero rows, report path, UTF-8 report, output path guard."""
+
+    def test_zero_row_batches_complete(self):
+        """Empty hosts with empty companies, and hosts but no member companies, complete with exit code 0 and a zero-row output."""
+        for hosts in ([], [host("loner", identity_source="null_org")]):
+            with tempfile.TemporaryDirectory() as tmp:
+                src, comp = write_inputs(tmp, hosts, [])
+                out = Path(tmp, "signals.parquet")
+                result = run_cli(["--hosts", src, "--companies", comp, "--output", out])
+                self.assertEqual(result.returncode, 0, result.stderr[-500:])
+                self.assertEqual(duckdb.connect().execute(f"SELECT count(*) FROM read_parquet('{out.as_posix()}')").fetchone()[0], 0)
+                self.assertTrue(Path(tmp, "signals_stage_report.md").exists())
+                self.assertIn("rows: 0", result.stdout)
+
+    def test_report_goes_next_to_scratch_output(self):
+        """With a non-default --output and no --report the report sits beside the output; --report overrides; the committed reports are untouched."""
+        before = dq_listing("signals")
+        with tempfile.TemporaryDirectory() as tmp:
+            src, comp = write_inputs(tmp, [host("acme")], [("id_acme", "Acme", "acme", 1)])
+            out = Path(tmp, "sub", "signals.parquet")
+            self.assertEqual(run_cli(["--hosts", src, "--companies", comp, "--output", out]).returncode, 0)
+            self.assertTrue(Path(tmp, "sub", "signals_stage_report.md").exists())
+            custom = Path(tmp, "elsewhere", "my_report.md")
+            self.assertEqual(run_cli(["--hosts", src, "--companies", comp, "--output", out, "--report", custom]).returncode, 0)
+            self.assertTrue(custom.exists())
+        self.assertEqual(before, dq_listing("signals"))
+
+    def test_default_output_keeps_committed_report_path(self):
+        """With the default output the report path is the committed outputs/dq path."""
+        guard = STAGE.load_guard()
+        default_report = STAGE.REPORT_DIR / "signals_stage_2026-01-01.md"
+        self.assertEqual(guard.choose_report_path(str(STAGE.OUTPUT_PATH), STAGE.OUTPUT_PATH, None, default_report, "signals"), default_report)
+
+    def test_cjk_name_under_cp1252_pipe(self):
+        """A CJK company name does not break the report under the default Windows pipe encoding."""
+        name = "\u682a\u5f0f\u4f1a\u793e\u30c6\u30b9\u30c8"
+        with tempfile.TemporaryDirectory() as tmp:
+            src, comp = write_inputs(tmp, [host(name)], [("id_x", name, name, 1)])
+            out = Path(tmp, "signals.parquet")
+            result = run_cli(["--hosts", src, "--companies", comp, "--output", out], env={"PYTHONIOENCODING": "cp1252"})
+            self.assertEqual(result.returncode, 0, result.stderr[-500:])
+            self.assertTrue(out.exists())
+
+    def test_output_under_raw_or_dataset_folder_refused(self):
+        """Outputs under data/raw (plain, with .., upper case) and under the dataset folder are refused and nothing is written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, comp = write_inputs(tmp, [host("acme")], [("id_acme", "Acme", "acme", 1)])
+            targets = [ROOT_DIR / "data" / "raw" / "qa_guard_test.parquet",
+                       str(ROOT_DIR / "data" / "silver" / ".." / "raw" / "qa_guard_test.parquet"),
+                       str(ROOT_DIR / "DATA" / "RAW" / "qa_guard_test.parquet"),
+                       "D:/Cyber_DataSet/qa_guard_test.parquet", "d:/CYBER_DATASET/sub/../qa_guard_test.parquet"]
+            for target in targets:
+                result = run_cli(["--hosts", src, "--companies", comp, "--output", target])
+                self.assertNotEqual(result.returncode, 0, str(target))
+                self.assertIn("refusing to write", result.stderr, str(target))
+                self.assertFalse(Path(target).exists(), str(target))
 
 
 if __name__ == "__main__":

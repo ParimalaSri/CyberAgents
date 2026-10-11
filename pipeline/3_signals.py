@@ -15,6 +15,7 @@ FULL_HOSTS_PATH = ROOT / "data" / "silver" / "hosts_full.parquet"
 FULL_COMPANIES_PATH = ROOT / "data" / "silver" / "companies_full.parquet"
 FULL_OUTPUT_PATH = ROOT / "data" / "gold" / "signals_full.parquet"
 REPORT_DIR = ROOT / "outputs" / "dq"
+GUARD_SCRIPT = ROOT / "scripts" / "path_guard.py"
 REPORT_SCRIPT = ROOT / ".claude" / "skills" / "pipeline-stage-build" / "scripts" / "stage_report.py"
 STATS_SCRIPT = ROOT / ".claude" / "skills" / "signal-engineering" / "scripts" / "signal_stats.py"
 
@@ -69,6 +70,14 @@ D9_COVERAGE = {
 D9_SPECIAL = {"max_cvss_band = 3": 460, "max_cvss_band = 2": 209, "max_cvss_band = 1": 70, "footprint_band = 1": 1215, "footprint_band = 2": 318,
               "footprint_band = 3": 27, "T2 only (T2 and not T1)": 202, "risky_service_exposed SSH only": 158,
               "any urgency signal": 1294, "strong urgency": 662}
+
+
+def load_guard():
+    """Import the shared output-path guard from scripts/ by file path (it is not a package)."""
+    spec = importlib.util.spec_from_file_location("path_guard", GUARD_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def quote_path(path):
@@ -255,8 +264,8 @@ def section_coverage(con, rep, total):
     members, counted, blind, with_non = con.execute(
         "SELECT (SELECT count(*) FROM host_flags), (SELECT count(*) FROM host_flags WHERE counted), "
         "(SELECT count(*) FROM signals WHERE host_signals_blind), (SELECT count(*) FROM signals WHERE counted_host_count < host_count)").fetchone()
-    assert con.execute("SELECT sum(counted_host_count) FROM signals").fetchone()[0] == counted, "sum(counted_host_count) != counted member host rows"
-    sum_host = con.execute("SELECT sum(host_count) FROM signals").fetchone()[0]
+    assert con.execute("SELECT coalesce(sum(counted_host_count), 0) FROM signals").fetchone()[0] == counted, "sum(counted_host_count) != counted member host rows"
+    sum_host = con.execute("SELECT coalesce(sum(host_count), 0) FROM signals").fetchone()[0]
     assert sum_host == members, f"sum(host_count) {sum_host} != member host rows {members}"
     rep.add(f"Member host rows {members:,} = counted {counted:,} + non-counted (CDN-tagged cert_o) {members - counted:,}; sum(host_count) = {sum_host:,} "
             f"equals member host rows (asserted); sum(counted_host_count) equals counted (asserted). Companies with at least one non-counted host: "
@@ -322,14 +331,21 @@ def main():
     parser.add_argument("--hosts", help="override the hosts parquet path")
     parser.add_argument("--companies", help="override the companies parquet path")
     parser.add_argument("--output", help="override the output parquet path")
+    parser.add_argument("--report", help="report markdown path (default: outputs/dq for the default output, else next to --output)")
     args = parser.parse_args()
+    guard = load_guard()
+    guard.use_utf8_output()
     hosts_path = args.hosts or (FULL_HOSTS_PATH if args.full else HOSTS_PATH)
     companies_path = args.companies or (FULL_COMPANIES_PATH if args.full else COMPANIES_PATH)
     output_path = args.output or (FULL_OUTPUT_PATH if args.full else OUTPUT_PATH)
     report_name = f"signals_stage_{'full_' if args.full else ''}{datetime.date.today().isoformat()}.md"
+    default_output = FULL_OUTPUT_PATH if args.full else OUTPUT_PATH
+    report_path = guard.choose_report_path(output_path, default_output, args.report, REPORT_DIR / report_name, "signals")
+    guard.check_output_path(output_path)
+    guard.check_output_path(report_path)
     con = duckdb.connect()
     run = run_stage(con, hosts_path, companies_path, output_path)
-    print_report(con, run, output_path, REPORT_DIR / report_name)
+    print_report(con, run, output_path, report_path)
 
 
 if __name__ == "__main__":
