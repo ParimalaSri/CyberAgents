@@ -170,3 +170,42 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Root cause: DuckDB rejects an empty list; the sample has no IPv6 CIDR hit.
 - Fix: helper `insert_rows` skips empty lists. Test coverage: the synthetic tests run with no IPv6 hits.
 - Contract rule: none (a crash, not a data defect).
+
+## DQ-001 Denylist keyword names become company names through the cert O route
+- Symptom: contract check "denylist leakage in 'name_norm' (shared rules)" fails on the hosts layer: 3 rows match, all `identity_source = 'cert_o'`:
+  'bouygues telecom' (keyword: telecom), 'viettel telecom corporation branch of viettel group' (keyword: telecom), 'hrvatski telekom d d' (keyword: telekom).
+  The same route also yields infrastructure or device-vendor names as `name_norm` (top cert_o values: 24 rows of a China Telecom Cloud cert O,
+  Huawei 11 and Huawei Software Technologies 8, Sierra Wireless 13, a cert O of just 'Dis' 7, Comcast Corporation 5).
+  The check on `identity_source = 'org'` rows (org and name_norm, 5,638 distinct pairs) finds 0 hits.
+- Root cause (read from `pipeline/1_clean.py` lines 108 to 112, supported by the rows): a cert O is rejected as a vendor only when it hits an exact, prefix or
+  pattern rule; keyword hits are deliberately let through (`vendor = bool(hit) and hit[0] != "keyword"`), and the keywords were gated on org text, not cert text.
+  Whether a telecom as a cert tenant should count is a design question (hypothesis: the stage author wanted tenants kept); the contract says no ISP names as companies.
+- Fix: owner / senior-data-engineer decision; either apply keyword rules to cert O, or accept and document an exception. Not applied by DQ.
+- Contract rule: `denylist: {column: name_norm, rules: shared}` in `context/contracts/hosts.yml` (fails today); `check_hosts_extra.py` repeats it on org rows only (passes).
+
+## DQ-002 ISP and hosting orgs survive as identity_source = 'org' (long tail, residual of RAW-013)
+- Symptom: among the 50 largest orgs with `identity_source = 'org'`, 20 orgs (537 rows) look like ISP, telecom or hosting by name (names only, one reviewer, crude keyword scan):
+  China Unicom Henan province network 51, Uninet S.A. de C.V. 37, Administracion Nacional de Telecomunicaciones 36, CLIENTE ANTEL URUGUAY 33, Web.com Group 29,
+  RackNerd LLC 28, PSINet 27, NTT America 26, IONOS Inc. 26, Vodafone Net Iletisim Hizmetler AS 25, Comcast IP Services 24, Fastweb SpA 23, Cloud Innovation Ltd 23,
+  CloudFly Net Inc 23, China Unicom Shandong province network 22, Taiwan Fixed Network 21, Telstra Limited 20, EGIHosting 20, webhosting servers 20,
+  Sichuan Yihu Data Technology 23 (unsure). The shared denylist check finds 0 hits on these rows, so this is a rule gap, not a matcher failure.
+- Root cause: no exact, prefix, pattern or keyword rule covers them (whole-word keywords: 'EGIHosting' and 'webhosting' are one token; 'unicom', 'cogent', 'comcast' are not rules).
+- Fix: owner decision on new rules through the existing 90% gate; stage code unchanged. A real fix is data-integrator work.
+- Contract rule: none can catch an unlisted name. Mitigation in the contract: the resolved share of `identity_source` must stay inside 5% to 20% (measured 14.73%), and the
+  denylist rule above fails as soon as a rule for these names is added to `context/denylist*.txt` and the stage is not rerun.
+
+## DQ-003 Removed duplicate rows are re-scans, not copies (extends PIPE-002)
+- Symptom: the stage report says "2,242 duplicate rows removed". Recomputed from the raw sample: 100,000 rows, 97,758 distinct keys, 1,098 key groups covering 3,340 rows;
+  0 of the 1,098 groups consist of copies with one timestamp; 976 groups have different `hostnames` arrays (2,105 extra distinct arrays dropped).
+  The kept row is the latest timestamp in all 97,758 groups (0 exceptions).
+- Root cause: as PIPE-002 (same endpoint scanned again with another banner or hostname); this is a measurement, not a new defect.
+- Fix: none required for correctness of the key; decision on aggregating hostnames stays open (owner).
+- Contract rule: key (host_ip, port, transport) unique and non-null (passes). The "lost hostnames" effect has no rule; it is documented only.
+
+## DQ-004 RAT noise rule is suffix-based: 185 backdoor-module rows are not noise
+- Symptom: `is_noise` flags 505 of 505 rows whose `shodan_module` ends in 'rat' (matches the stated rule exactly), but `xiaongmai-backdoor` (183 rows) and `njrat78` (2 rows)
+  are not noise although the module names read as backdoor / njRAT (names only).
+- Root cause: rule written as "module ends in rat" (`RAT_MODULE_SUFFIX`); the author lists this as an open choice.
+- Fix: owner decision. If accepted as noise, extend the rule; if not, document the module names as accepted.
+- Contract rule: "is_noise rows have a tag or a module ending rat" and "noise tags or RAT module imply is_noise" (both pass). A rule for 'backdoor' / 'rat' anywhere in the name is NOT added
+  because it would fail on a decision that is still open; add it when the owner decides.
