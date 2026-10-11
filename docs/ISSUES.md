@@ -283,3 +283,9 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Fix: none by DQ. For the data-analyst at calibration: require `noise_host_count >= 2` as well as the share, or a strict `> 0.5`. Not applied.
 - Contract rule: `noise_host_share` equals its formula and lies in 0..1; `noise_host_count` is 0 when `org_host_count` is 0; `check_companies_extra.py` recomputes `noise_host_count` per company through `org_norm` (0 disagreements). The threshold itself is M2 and is not contracted.
 
+
+## PIPE-006 `signal_stats.py` crashes on the `risky_ports` list column (array types pass its numeric filter)
+- Symptom: `python .claude/skills/signal-engineering/scripts/signal_stats.py data/gold/signals.parquet` prints the coverage rows up to `risky_service_host_count`, then stops with `Conversion Error: Unimplemented type for cast (INTEGER[] -> DOUBLE) when casting from source column risky_ports`; the redundancy section never prints.
+- Root cause: `pick_signals` selects every column whose type string starts with a numeric prefix (`INTEGER`, ...), and `INTEGER[]` starts with `INTEGER`, so the list column `risky_ports` (D9.4 column 35) is cast to DOUBLE. The helper lives under `.claude/skills/`, outside the data-engineer write scope; not edited.
+- Fix: workaround in the stage hand-off, pass the columns explicitly with `--signals` (every BOOLEAN, INTEGER, SMALLINT and DOUBLE column whose type does not end in `]`). Suggested fix for the owner of the skill: skip types ending in `]` in `pick_signals`. The stage itself is not affected.
+- Contract rule: none (a helper script, not a data layer).
