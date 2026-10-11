@@ -11,7 +11,7 @@ section 15, or labelled **assumption**, **estimate** or **to be calibrated**. No
 
 Contents: 1 Overview | 2 Layers | 3 Signals and scoring | 4 Rule vs LLM | 5 LLM layer | 6 Evals | 7 Cost model |
 8 Serving | 9 Environments and governance | 10 Sampling | 11 Trade-offs and weaknesses | 12 Traceability |
-13 Roadmap | 14 What the owner must supply | 15 Data decisions D1-D4 (proposed)
+13 Roadmap | 14 What the owner must supply | 15 Data decisions D1-D6 (D1-D4 proposed; D5, D6 decided under delegation)
 
 ---
 
@@ -119,8 +119,8 @@ has locally. Findings are about that snapshot; nothing here claims they hold for
 | Input | Bronze (sample on dev, full on prod). |
 | Output | `data/silver/hosts.parquet` |
 | Grain / key | One row per (`host_ip`, `port`, `transport`). Unique after dedupe. |
-| Transformations | (1) `host_ip = coalesce(ip_str, ipv6)` (RAW-003, 587 IPv6 rows). (2) Dedupe on the key, keep latest timestamp (RAW-004, 4,109 duplicate rows, 4.1%; cause not yet verified). (3) Parse `ssl.cert.expires/issued` with `try_strptime`; null years below 1990 or above 2100 (RAW-007: 3 bad expiry values, 1 bad issue date in the head sample). (4) Normalise `org` (case, punctuation, legal suffix; D1 prefix families). (5) Reduce `vulns` to `max_cvss`, `has_kev`, `vuln_count` (capped), because CVE lists look banner-inferred (RAW-006). (6) Flags: `is_infrastructure`, `infra_reason`, `is_noise`, `identity_source` (D4). |
-| Key columns | `host_ip, port, transport, timestamp, org, org_norm, isp, asn, country_code, product, version, os, tags, cloud_provider, cert_expires, cert_expired, cert_subject_o, cert_subject_cn, ssl_versions, max_cvss, has_kev, vuln_count, hostnames, domains, shodan_module, is_infrastructure, infra_reason, is_noise, identity_source`. Final list lives in `context/schema.md` and the contract. |
+| Transformations | (1) `host_ip = coalesce(ip_str, ipv6)` (RAW-003, 587 IPv6 rows). (2) Dedupe on the key, keep latest timestamp (RAW-004, 4,109 duplicate rows, 4.1%; cause not yet verified). (3) Parse `ssl.cert.expires/issued` with `try_strptime`; null years below 1990 or above 2100 and set `cert_date_invalid` BOOLEAN (RAW-007, PIPE-001: 23 expiry and 26 issued values on the spread sample; D6). (4) Normalise `org` (case, punctuation, legal suffix; D1 prefix families). (5) Reduce `vulns` to `max_cvss`, `has_kev` (both computed before capping) and `vuln_count` (capped at 50, informational only), because CVE lists look banner-inferred (RAW-006; D6). (6) Flags: `is_infrastructure`, `infra_reason`, `is_noise` (tag noise, or module matching `(^\|-)rat$\|^njrat$\|^blackshades$`; D6), `identity_source` (D4, D6). (7) `dup_count` INTEGER = `count(*) OVER (PARTITION BY host_ip, port, transport)` before dedupe (D6). |
+| Key columns | `host_ip, port, transport, timestamp, org, org_norm, isp, asn, country_code, product, version, os, tags, cloud_provider, cert_expires, cert_expired, cert_date_invalid, cert_subject_o, cert_subject_cn, ssl_versions, max_cvss, has_kev, vuln_count, dup_count, hostnames, domains, shodan_module, is_infrastructure, infra_reason, is_noise, identity_source`. Final list lives in `context/schema.md` and the contract. |
 | Not done here | Infrastructure rows are **kept** (D4 consequence), so stage 2 can report shares that sum to 100%. |
 | Contract | `context/contracts/hosts.yml` |
 | Owner / gate | Builder: `data-engineer`. Gate: `data-quality-engineer` PASS. |
@@ -550,6 +550,7 @@ columns). A chunked read inside `1_clean.py` is likely needed; the stage stays o
 10. **Probe is not a random sample.** 9,239 rows from 21 windows, correlated within a window; per-window kept share ranged 3.6% to 20.2%.
 11. **Business context is empty.** `context/business.md` and `context/icp.md` are blank, so `fit` and the D1/D2 buyer reasoning rest on the one-line brief, not a written ICP.
 12. **Ethics and use.** Scan data describes exposure of named organisations. Outreach must not claim a breach or scare; drafts are suggestions and a human sends them (skill rules).
+13. **Network-operator residual (DQ-002, D6.7).** ISP, hosting and telecom orgs that no rule names survive as companies: 20 of the top 50 orgs, 537 rows, on the spread sample (names only, one reviewer). Generic words (`network`, `internet`, `net`, `cloud`) cannot pass the 90% gate, and a hand list does not scale to the full file. Mitigation: gated operator words, named big providers, a possible M2 fit penalty and the `review` band; the top-50 read is repeated on the full run.
 
 ---
 
@@ -634,10 +635,10 @@ with M3/M4 (independent work), and `tech-writer` can draft docs while evals run.
 
 ---
 
-## 15. Data decisions (D1-D5)
+## 15. Data decisions (D1-D6)
 
 Decided 2026-10-11 on branch `feat/senior-data-engineer/data-decisions`. **Status: proposed, pending owner approval.**
-The pipeline must not depend on any of D1-D4 until the owner approves them. D5 was added later the same day, see its own status line.
+The pipeline must not depend on any of D1-D4 until the owner approves them. D5 and D6 were added later the same day, see their own status lines.
 
 ### Evidence base
 - `outputs/profile_sample_100k.md`: the first 100,000 lines of the dump (1.11 GB). This is the "head sample".
@@ -739,8 +740,9 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   2. `org`: normalised `org` (case, punctuation, legal suffix) that is not infrastructure. Infrastructure means a
      denylist match (exact, prefix, pattern or keyword) on the org text, OR a non-null `cloud.provider`, OR a
      `cloud`/`cdn` tag, OR the host IP matching a pattern CIDR. **The isp text is not used by itself** (D5).
-  3. `cert_o`: the row is infrastructure, and `ssl.cert.subject.O`, after normalisation, is not a default or vendor
-     value. A default-value list is needed: acme co, default company ltd, internet widgits pty ltd, plesk, plus the
+  3. `cert_o`: the row is infrastructure **or its `org` is null** (amended by D6), and `ssl.cert.subject.O`, after
+     normalisation, is not a default or vendor value and passes every denylist rule type including keywords (D6). A
+     default-value list is needed: acme co, default company ltd, internet widgits pty ltd, plesk, plus the
      denylisted vendors.
   4. `infrastructure_unresolved`: the row is infrastructure with no usable tenant evidence. Kept in hosts, never a company.
   5. `null_org`: org is null (0.17%) and there is no cert O. Unresolved.
@@ -810,6 +812,46 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   denylist rule that passed its gate carries the same limit, and `check_contract.py` still enforces none of the prefix, pattern or
   keyword rules (RAW-010). The tenancy-versus-own-estate reading of the Google-isp group is inferred from the registrant, hostnames and
   port patterns; it was not confirmed by any external lookup (WHOIS, BGP) or by the customer.
+
+### D6. hosts layer (1_clean) choices
+*Decided by senior-data-engineer under the owner's standing delegation ("when in doubt, the senior decides"), 2026-10-11. Status: decided; the owner may overrule. Evidence: `pipeline/1_clean.py` output on `data/sample/spread_100k.jsonl` (97,758 hosts rows), `outputs/dq/hosts_review_2026-10-11.md`, ISSUES RAW-006/007/013, PIPE-001..003, DQ-001..004. Read-only measurements; nothing was rerun.*
+
+**D6.1 Noise modules**
+- **Context.** `is_noise` = tag honeypot/c2/tor/compromised, or a module ending in `rat`. 1,089 noise rows. The loose suffix rule would also catch unrelated names, and DQ-004 reports 185 backdoor-module rows outside it: `njrat78` 2 rows, `xiaongmai-backdoor` 183 rows.
+- **Decision.** Replace the suffix rule with the explicit pattern `(^|-)rat$|^njrat$|^blackshades$`. Noise rows 1,089 to 1,136. Do NOT widen to `njrat78` or `xiaongmai-backdoor`. **DQ-004 is closed "by design":** `njrat78` is 2 rows on Meta cache nodes (a banner artefact); `xiaongmai-backdoor` is 183 rows over 25 orgs, port 9530, a fact about a DVR device family affected by a backdoor, with 7 rows on real orgs. The host is a victim or a vulnerable device, not attacker infrastructure, and that is useful urgency evidence for a security seller. Dropping it from company membership would hide the finding. `blackshades` is 47 rows on port 4444, 1 real org (included).
+- **Alternatives.** Keep the suffix rule (rejected: matches by accident); match `rat` or `backdoor` anywhere (rejected: removes real victims).
+- **Consequences.** 47 more rows become noise. Module-name rules are a closed, explicit list; new RAT families are added by decision, not by pattern. The contract rule "noise implies tag or RAT module" must use the new pattern.
+
+**D6.2 `vuln_count`**
+- **Decision.** Capped at 50, informational only. Signals use `max_cvss` and `has_kev`, computed before capping. **Why.** CVE lists look banner-inferred (RAW-006; average 46.1, max 778). **Alternative:** drop the count (rejected: cheap context for `why`). **Consequence:** no score weight on the count.
+
+**D6.3 Certificate dates**
+- **Decision.** Values outside 1990..2100 stay nulled; add `cert_date_invalid` BOOLEAN (true when either date was present but rejected). A 1970 issue date (24 of the 26 bad issued values) is not a v1 signal. `cert_expired` (raw boolean) is kept as delivered and may disagree with a null date. **Alternative:** treat 1970 as a "device without clock" signal (rejected: 24 rows, no evidence it predicts need). **Consequence:** the cert-expiry signal in section 3.2 uses `cert_expired` and `cert_expires` only where valid.
+
+**D6.4 cert_o rule, name guard and DQ-001**
+- **Context.** `cert_o` rows: 644 rows, 432 distinct names (0.66% of hosts), 637 on infrastructure rows and 7 on null-org rows. D4 rule 3 said "the row is infrastructure"; the implementation also takes null-org rows, which is right (a null org with a usable cert O is as good as an infrastructure row). Most cert_o names are real tenants (Accenture 20, Okta 7, Datadog 6, SAP 6, Salesforce 6, Royal Bank of Scotland 5). The contract check on `name_norm` fails on 3 rows (`bouygues telecom`, `viettel telecom corporation branch of viettel group`, `hrvatski telekom d d`), because `1_clean.py` lines 108 to 112 let keyword hits through (`vendor = bool(hit) and hit[0] != "keyword"`). Device-vendor and cloud-operator cert O values also pass: a China Telecom Cloud cert O 24 rows, Huawei 11, Huawei Software Technologies 8, Huawei Technologies 2, Sierra Wireless 13, `dis` 7, Comcast 5, NTT Docomo Business 6.
+- **Decision (DQ-001).** (a) Amend D4 rule 3: cert_o applies when infrastructure OR org is null (done above). (b) A cert O is rejected when it hits ANY rule type of the shared matcher (exact, prefix, pattern AND keyword); in `1_clean.py` the line becomes `vendor = bool(hit)`. Keyword rules were gated on org text, so the cert-text gate is: every distinct cert O newly matched by a keyword is hand-reviewed at the first full run (up to 50 names, at least 90% infrastructure or operator), reported in `outputs/denylist_*`. On the spread sample the new hits are 3 names, 3 rows, all telecom operators (3 of 3, too few to be a real gate, so the full-file review is the gate). (c) Add a small device-vendor / operator cert list to `context/cert_default_names.txt` as exact normalised names: `huawei`, `huawei technologies`, `huawei software technologies`, `sierra wireless`, `ruckus wireless`, `aruba networks`, `arista networks`, `mitel networks`, `technicolor`, `rakwireless`, `comcast`, `ntt docomo business`, the China Telecom Cloud name (`天翼云科技有限公司`) and `dis`, plus the name guard `meta platforms`, `facebook`, `apple`, `netflix` (own-estate names that sit on CDN or cache-node ranges). `dis` is ambiguous and is listed on the evidence that it is 7 rows on 3 orgs with no company identity; the data-integrator may drop it if a look at the rows shows a tenant. Org-side prefixes `facebook`, `meta platforms` and `netflix` go through the 90% review before they are added to the denylist. (d) A cert_o company is weaker than an org company, and that is accepted: it is 0.66% of rows. **Alternative:** accept keyword hits as tenants (rejected: the contract and CLAUDE.md say no ISP names as companies, and the hand list needs no scaling at this volume). **Contract assertion (cleanest, does not weaken it):** keep `denylist: {column: name_norm, rules: shared}` unchanged with 0 hits allowed; it now passes by construction because the stage applies the same matcher. Add two assertions to `check_hosts_extra.py`: no `name_norm` of a `cert_o` row is in `load_cert_defaults()`, and recompute `cert_usable` independently from raw cert O with the matcher and compare row counts per `identity_source`.
+- **Stage 3 rule.** For `cert_o` companies, host-borne signals (ports, CVSS, KEV, EOL, legacy TLS) count only from hosts NOT tagged `cdn` (the cert sits on shared edge hosts, so those host facts belong to the CDN, not the named tenant). Cert signals always count.
+- **Consequences.** About 100 of the 644 rows move to `infrastructure_unresolved` on the sample (the listed names total 24 + 13 + 11 + 8 + 7 + 6 + 5 + 3 + 2 + 1 + 1 + 1 + 1 + 4 = 87, plus 3 keyword hits, plus any Meta, Facebook, Apple, Netflix rows; the exact figure is for `1_clean` to print). The resolved share shifts by under 0.1 point.
+
+**D6.5 Dedupe**
+- **Decision.** Keep the latest row per (`host_ip`, `port`, `transport`); do not union hostnames. Add `dup_count` INTEGER (`count(*) OVER (PARTITION BY host_ip, port, transport)` before dedupe). **Evidence (DQ-003):** 100,000 raw rows, 97,758 keys, 1,098 groups covering 3,340 rows, 2,242 removed; all removed rows are same-key re-scans (every group has distinct timestamps; the kept row is the latest in all 97,758 groups); 976 groups have different hostname arrays. **Alternative:** aggregate hostnames (rejected for v1: domains are evidence only, D4 rule 3b is closed). **Consequence:** reopen only if the 50-row domain check passes; `dup_count` shows where it matters.
+
+**D6.6 Columns**
+- **Decision.** Nothing required by the section 3 signals is missing. The extras are accepted. `http.waf`, `devicetype` and `cpe23` stay dropped. Stage 3 derives `max_cvss_band`, `legacy_tls`, the risky-port list and EOL from existing columns. `behind_waf` is v2 (section 3.1).
+
+**D6.7 DQ-002: ISP, hosting and telecom orgs that survive as `identity_source='org'`**
+- **Context.** In the top 50 orgs, 20 orgs / 537 rows read as network operators (China Unicom Henan province network 51, Uninet 37, ANTEL 36 and 33, Web.com 29, RackNerd 28, PSINet 27, NTT America 26, IONOS 26, Vodafone 25, Comcast IP Services 24, Fastweb 23, CloudFly 23, Telstra 20, EGIHosting 20, webhosting servers 20). The matcher is correct; no rule covers them (RAW-013 residual). Org rows are 13,755 rows over 5,504 distinct names. Whole-word probes on `name_norm` of org rows, rows / distinct names: `unicom` 247 / 39, `province network` 202 / 30, `network` 688 / 271, `internet` 462 / 214, `communications` 342 / 140 (this word already failed the gate at 78.0%), `net` 212 / 99, `cloud` 192 / 70, `mobile` 66 / 26, `vodafone` 90 / 19, `ntt` 63 / 8, `telstra` 24 / 2, `comcast` 27 / 3, `host` 34 / 20, `servers` 77 / 24. The generic words are mixed with real companies and cannot pass a 90% gate; only the distinctive operator words can.
+- **Decision.** Do not chase the long tail by hand. For v1 (a) run these candidates through the existing org-scoped 90% gate and add the ones that pass: `org: unicom`, `org: province network`, `org: web hosting` and `org: hosting` as a substring variant (to catch EGIHosting) if its review passes. (b) Add exact or prefix entries only for named big providers seen in the review list with at least 20 rows (Telstra, Comcast, Vodafone, NTT America, IONOS, RackNerd, Web.com, PSINet, Fastweb, Uninet, ANTEL); they fit the D1/D2 families, are reviewed once, and are cheap. (c) Accept the remaining residual as a documented known weakness (section 11.2, item 13), to be measured and reported on every run, and let M2 handle it: stage 4 may add a fit penalty for network-operator-looking names (name-shape flag derived from the gated words), and ambiguous cases fall into the `review` band, where the LLM sees the `why`. No rule is added only to make a check pass.
+- **Cost of each error direction (sales use case).** A missed operator (false company) puts a telecom or host on the list with the exposure of its customers in the `why`: a rep wastes a touch and the list loses credibility, but it is visible and the review band catches some. A wrongly removed real company vanishes silently, and the list already keeps only about 14% of rows. Precision is the stated priority (CLAUDE.md), so a gate at 90% is kept; but because the second error is invisible, no generic word (`network`, `internet`, `net`, `cloud`) is added.
+- **Scale.** On the full file (about 7.6M to 8.9M rows, estimated) the operator long tail is thousands of names; a hand list will not scale, and nothing here claims it does. Measure the residual with the same top-50 read on the full run and report the count; if it is above 10% of the top 50, reopen with a data-driven approach (ASN-level or name-shape rules, owner decision).
+- **Consequences.** Denylist coverage improves a little (about 50 to 100 rows of the 537 on the sample if all candidates pass; not measured), the weakness stays named, and the contract cannot catch an unlisted name.
+
+**D6 instruction list (ordered; one owner per step)**
+1. `data-integrator`: add the cert default/vendor names and the name guard to `context/cert_default_names.txt`; run the 90% gate for org prefixes `facebook`, `meta platforms`, `netflix` and for the D6.7 candidates (`unicom`, `province network`, `hosting` substring, `web hosting`) and the named-provider entries; record in `outputs/denylist_*` and RAW-013; run `scripts/test_denylist_match.py`.
+2. `data-engineer` (`pipeline/1_clean.py` and `scripts/test_1_clean.py`): noise pattern `(^|-)rat$|^njrat$|^blackshades$`; `vendor = bool(hit)` for cert O; cert_o when infrastructure OR org null; `cert_date_invalid`; `dup_count`; `vuln_count` cap 50 kept; print new counts. Tests for each, plus a keyword cert O case.
+3. `data-quality-engineer`: update `context/contracts/hosts.yml` (new columns, noise rule, `cert_issued` range); add the two `check_hosts_extra.py` assertions; keep the `name_norm` denylist check at 0 hits; rerun on the sample and record DQ-001..004 as closed (DQ-004 "by design", DQ-002 "accepted, see 11.2 item 13").
+4. `senior-data-engineer`: review the PR; the stage 3 rule for `cert_o` and CDN-tagged hosts is enforced at M2.
 
 ### Denylist changes implied (for data-integrator / owner to apply to `context/denylist.txt`)
 1. Keep: microsoft*, oracle*, ibm, ibm cloud, softlayer*, zscaler*, palo alto networks*, imperva*, incapsula*,
