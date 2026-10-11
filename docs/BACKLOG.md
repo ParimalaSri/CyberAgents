@@ -24,13 +24,13 @@ Done:
 - 17 skills, 7 agents, hooks and permissions built and pushed to `main`.
 - Owner decisions approved: spread sample in gitignored `data/sample/`; sample from the decompressed `.json` (after a match check against the `.zst`); serving extract on `prod` under `outputs/` (security-reviewed); dev LLM ceiling small with k = 2; redacted trace sample committed under `outputs/`; `final_band` column and noise-company rule settled at M2; `security-reviewer` agent created.
 
+Also done since:
+- Spread sample (`data/sample/spread_100k.jsonl`) and re-profile; denylist split into exact, prefix, pattern, keyword (org-scoped), cert-default files with accent folding; D5 (isp text never excludes) decided by `senior-data-engineer` under the owner's delegation; contract checker applies the shared matcher (RAW-010 closed); PR template, CODEOWNERS, `security-reviewer` agent.
+
 Open:
 - [ ] `business.md` and `icp.md`: drafts written, **owner fills the `[OWNER]` blanks**.
-- [ ] Denylist fixes: prefix families, cloud/CDN-tag rule, fix `ace`, move CIDR/pattern entries out, cert-default list (`data-integrator`).
-- [ ] Spread sample builder in `scripts/`, sample in `data/sample/`, re-profile (expect about 86% denylisted, port 12304 about 2%) (`data-integrator`).
-- [ ] Confirm the `.zst` and `.json` have identical content.
-- [ ] PR template and CODEOWNERS in `.github/`.
-- [ ] Merge the architecture and context branches into `dev` (human).
+- [ ] Merge the stacked branches into `dev` (human). Tip: `feat/data-quality/contract-matcher`.
+- [ ] Whole-file match of the `.zst` and `.json` (only the first 512 MiB compared).
 
 ## Known blockers and risks
 - Recall is capped: about 10% of rows can become companies; vulnerable estates sit mostly on denylisted hosts.
