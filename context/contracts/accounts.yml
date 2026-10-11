@@ -1,0 +1,194 @@
+# Contract for the accounts gold layer (stage pipeline/4_score.py), 17 columns (docs/ARCHITECTURE.md D9.6 item 9, rules D9.9, amended by D10).
+# Ranges come from MEANING, not from observed values (a score is 0 to 100, a band has its fixed set).
+# Run from the repo root (the cross-file checks use relative paths):
+#   python .claude/skills/data-quality-check/scripts/check_contract.py context/contracts/accounts.yml --report
+# Checks the generic runner cannot express (independent recompute of fit, urgency, contact, bands, caps and top_signals from signals;
+# why phrase and truth checks; sort order; the observed numbers table):
+#   python .claude/skills/data-quality-check/scripts/check_accounts_extra.py
+#
+# PROVISIONAL CONSTANTS (D9.7, D10): the checks below that name FLOOR (0.5), X (40) and Y (20) hard-code the provisional values. They are NOT
+# calibrated and NOT owner-approved. When scoring-calibration changes FLOOR, X or Y, change them in this file (the three checks marked
+# "PROVISIONAL" and the constants block of check_accounts_extra.py) in the same PR as section 3.4 of ARCHITECTURE.md; a contract changes
+# only with a reason. The checks that never change with calibration: 0 <= contact_score <= urgency_score, the score ranges, the band set,
+# the cap logic, the exclude rule (D9.3, decided), the why rules.
+# STAGE-4 RULE, relaxed at M3: decision and prompt_version are all null and final_band = band, and no account is in `contact` while
+# decision is null (D10). llm/adjudicate.py may set decision, prompt_version and final_band = decision for band = review rows only; the
+# M3 PR must replace the checks marked "M2 only" by D9.9 rule 6 (decision null unless band = review; prompt_version null exactly when
+# decision is null; final_band = decision for decisions contact or skip).
+# CONVENTION (stage 4, not spelled out in D9.6): an excluded account has band_uncapped = 'exclude' and band = 'exclude' and no cap_reasons.
+# CAP REASONS ORDER (stage 4 and this contract): alphabetical (low_confidence, operator_name_shape, operator_unverified, singleton),
+# comma separated, no spaces, no duplicates, null when none. D9.6 item 5 listed the order operator_name_shape, operator_unverified,
+# low_confidence, singleton; the stage sorts alphabetically; the contract follows the stage (docs/ISSUES.md DQ-012).
+layer: accounts
+path: data/gold/accounts.parquet
+key: account_id          # one row per account (D9.6 item 1); account_id = company_id
+
+# row_rule: accounts rows == signals rows (the join fan-out guard, CLAUDE.md). A second guard against companies.parquet follows in `checks`.
+# On the FULL run the stage reads signals_full.parquet and writes accounts_full.parquet: change `path`, `other` and the cross-file paths in
+# the PR that promotes to prod; a contract changes only with a reason.
+row_rule:
+  other: data/gold/signals.parquet
+  op: "=="
+
+columns:
+  account_id: {type: VARCHAR, nullable: false}
+  company_name: {type: VARCHAR, nullable: false}
+  country_code: {type: VARCHAR}                          # carried from signals; null only when every host of the company has a null country
+  host_count: {type: INTEGER, nullable: false, min: 1}
+  identity_source: {type: VARCHAR, nullable: false}
+  identity_confidence: {type: VARCHAR, nullable: false}
+  fit_score: {type: INTEGER, nullable: false, min: 0, max: 100}
+  urgency_score: {type: INTEGER, nullable: false, min: 0, max: 100}
+  contact_score: {type: INTEGER, nullable: false, min: 0, max: 100}
+  top_signals: {type: VARCHAR}                           # null for urgency 0 and for excluded accounts (check below)
+  band_uncapped: {type: VARCHAR, nullable: false}
+  cap_reasons: {type: VARCHAR}                           # null exactly when band = band_uncapped
+  band: {type: VARCHAR, nullable: false}
+  why: {type: VARCHAR, nullable: false}
+  decision: {type: VARCHAR}                              # null until M3
+  prompt_version: {type: VARCHAR}                        # null until M3
+  final_band: {type: VARCHAR, nullable: false}
+
+# Shared denylist leakage check on the carried name column (hyperscaler, CDN, ISP and hosting names must not be accounts).
+denylist:
+  column: company_name
+  rules: shared
+
+checks:
+  # ---- structure -------------------------------------------------------------------------------------------------------------
+  - name: exactly 17 columns (D9.6 item 9)
+    sql: "SELECT count(*) FROM (DESCRIBE t)"
+    expect: 17
+  - name: every column has exactly the contracted name and type, in the contracted order (the runner matches types by prefix, DQ-010)
+    sql: >-
+      SELECT count(*) FROM (SELECT column_name, column_type, row_number() OVER () AS pos FROM (DESCRIBE t))
+      WHERE (column_name, column_type, pos) NOT IN (('account_id', 'VARCHAR', 1), ('company_name', 'VARCHAR', 2), ('country_code', 'VARCHAR', 3),
+      ('host_count', 'INTEGER', 4), ('identity_source', 'VARCHAR', 5), ('identity_confidence', 'VARCHAR', 6), ('fit_score', 'INTEGER', 7),
+      ('urgency_score', 'INTEGER', 8), ('contact_score', 'INTEGER', 9), ('top_signals', 'VARCHAR', 10), ('band_uncapped', 'VARCHAR', 11),
+      ('cap_reasons', 'VARCHAR', 12), ('band', 'VARCHAR', 13), ('why', 'VARCHAR', 14), ('decision', 'VARCHAR', 15),
+      ('prompt_version', 'VARCHAR', 16), ('final_band', 'VARCHAR', 17))
+  - name: account_id is 16 lowercase hex characters
+    sql: "SELECT count(*) FROM t WHERE NOT regexp_matches(account_id, '^[0-9a-f]{16}$')"
+  # ---- fan-out and id sets: accounts == signals == companies (D9.9 rule 1) -------------------------------------------------------
+  - name: row count equals companies.parquet (second row guard; the first is row_rule against signals.parquet)
+    sql: "SELECT (SELECT count(*) FROM t) - (SELECT count(*) FROM read_parquet('data/silver/companies.parquet'))"
+  - name: cross-file, account_id sets equal the signals company_id set in both directions (no fan-out, no drop, account_id = company_id)
+    sql: >-
+      SELECT (SELECT count(*) FROM t WHERE account_id NOT IN (SELECT company_id FROM read_parquet('data/gold/signals.parquet')))
+      + (SELECT count(*) FROM read_parquet('data/gold/signals.parquet') WHERE company_id NOT IN (SELECT account_id FROM t))
+  - name: cross-file, account_id sets equal the companies company_id set in both directions
+    sql: >-
+      SELECT (SELECT count(*) FROM t WHERE account_id NOT IN (SELECT company_id FROM read_parquet('data/silver/companies.parquet')))
+      + (SELECT count(*) FROM read_parquet('data/silver/companies.parquet') WHERE company_id NOT IN (SELECT account_id FROM t))
+  - name: cross-file, the carried columns (company_name, country_code, host_count, identity_source, identity_confidence) equal signals on every row
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE t.company_name IS DISTINCT FROM s.company_name OR t.country_code IS DISTINCT FROM s.country_code
+      OR t.host_count IS DISTINCT FROM s.host_count OR t.identity_source IS DISTINCT FROM s.identity_source
+      OR t.identity_confidence IS DISTINCT FROM s.identity_confidence
+  - name: company_name is non-empty and trimmed
+    sql: "SELECT count(*) FROM t WHERE trim(company_name) = '' OR company_name <> trim(company_name)"
+  # ---- scores (D9.6 items 2 to 4; the ranges come from the column rules above) ----------------------------------------------------
+  - name: contact_score is between 0 and urgency_score (never changes with calibration; no fit can raise contact above urgency)
+    sql: "SELECT count(*) FROM t WHERE contact_score < 0 OR contact_score > urgency_score"
+  - name: PROVISIONAL FLOOR 0.5, contact_score >= FLOOR * urgency_score exactly (integer round half up never falls below FLOOR * urgency)
+    sql: "SELECT count(*) FROM t WHERE contact_score * 100 < 50 * urgency_score"
+  - name: contact_score is 0 when urgency_score is 0 (a company with no urgency scores 0 under form (b))
+    sql: "SELECT count(*) FROM t WHERE urgency_score = 0 AND contact_score <> 0"
+  - name: fit_score 0 gives contact_score exactly round half up of FLOOR * urgency (PROVISIONAL FLOOR 0.5)
+    sql: "SELECT count(*) FROM t WHERE fit_score = 0 AND contact_score <> (urgency_score + 1) // 2"
+  - name: fit_score 100 gives contact_score equal to urgency_score
+    sql: "SELECT count(*) FROM t WHERE fit_score = 100 AND contact_score <> urgency_score"
+  # ---- bands (D9.6 item 5, D9.9 rules 3 to 5, D10) -------------------------------------------------------------------------------
+  - name: band, band_uncapped and final_band are all in (contact, review, skip, exclude)
+    sql: >-
+      SELECT count(*) FROM t WHERE band NOT IN ('contact', 'review', 'skip', 'exclude') OR band_uncapped NOT IN ('contact', 'review', 'skip', 'exclude')
+      OR final_band NOT IN ('contact', 'review', 'skip', 'exclude')
+  - name: PROVISIONAL X = 40, Y = 20, band_uncapped follows contact_score (contact from 40, review from 20, else skip) for every non-excluded account
+    sql: >-
+      SELECT count(*) FROM t WHERE band_uncapped <> 'exclude' AND band_uncapped IS DISTINCT FROM
+      (CASE WHEN contact_score >= 40 THEN 'contact' WHEN contact_score >= 20 THEN 'review' ELSE 'skip' END)
+  - name: exclude exactly when noise_host_count >= 2 AND noise_host_share >= 0.5 (D9.3 and DQ-008; cross-file to signals); one honeypot row on a singleton is not exclude
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE (t.band = 'exclude') IS DISTINCT FROM (s.noise_host_count >= 2 AND s.noise_host_share >= 0.5)
+  - name: band_uncapped is exclude exactly when band is exclude (stage convention), and an excluded account has no cap_reasons
+    sql: >-
+      SELECT count(*) FROM t WHERE (band_uncapped = 'exclude') IS DISTINCT FROM (band = 'exclude') OR (band = 'exclude' AND cap_reasons IS NOT NULL)
+  - name: caps move contact to review only (band differs from band_uncapped only as contact to review; a cap never raises a band or lowers to skip)
+    sql: "SELECT count(*) FROM t WHERE band <> band_uncapped AND NOT (band_uncapped = 'contact' AND band = 'review')"
+  - name: cap_reasons is null exactly when band = band_uncapped (D9.9 rule 4)
+    sql: "SELECT count(*) FROM t WHERE (cap_reasons IS NULL) IS DISTINCT FROM (band = band_uncapped)"
+  - name: no account is in band contact while decision is null (D10; only adjudication may clear a would-be contact)
+    sql: "SELECT count(*) FROM t WHERE band = 'contact' AND decision IS NULL"
+  - name: M2 only, band = review with band_uncapped = contact exactly when cap_reasons contains operator_unverified (D10)
+    sql: >-
+      SELECT count(*) FROM t WHERE (band = 'review' AND band_uncapped = 'contact')
+      IS DISTINCT FROM coalesce(list_contains(string_split(cap_reasons, ','), 'operator_unverified'), false)
+  - name: skip implies contact_score below Y, review implies Y <= contact_score or a cap (PROVISIONAL Y = 20)
+    sql: >-
+      SELECT count(*) FROM t WHERE (band = 'skip' AND contact_score >= 20) OR (band = 'review' AND contact_score < 20 AND cap_reasons IS NULL)
+  # ---- cap reasons (D9.6 item 5, D10) -------------------------------------------------------------------------------------------
+  - name: cap_reasons holds only low_confidence, operator_name_shape, operator_unverified, singleton, comma separated, alphabetical, no duplicates, no spaces, never empty
+    sql: >-
+      SELECT count(*) FROM t WHERE cap_reasons IS NOT NULL AND (NOT list_has_all(['low_confidence', 'operator_name_shape', 'operator_unverified', 'singleton'],
+      string_split(cap_reasons, ',')) OR string_split(cap_reasons, ',') <> list_sort(string_split(cap_reasons, ','))
+      OR len(string_split(cap_reasons, ',')) <> len(list_distinct(string_split(cap_reasons, ','))))
+  - name: operator_unverified is carried by every would-be contact (band_uncapped = contact) and by no other account
+    sql: >-
+      SELECT count(*) FROM t WHERE (band_uncapped = 'contact') IS DISTINCT FROM coalesce(list_contains(string_split(cap_reasons, ','), 'operator_unverified'), false)
+  - name: singleton is listed exactly for would-be contacts with is_singleton in signals
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE coalesce(list_contains(string_split(t.cap_reasons, ','), 'singleton'), false) IS DISTINCT FROM (t.band_uncapped = 'contact' AND s.is_singleton)
+  - name: low_confidence is listed exactly for would-be contacts with identity_confidence = low in signals
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE coalesce(list_contains(string_split(t.cap_reasons, ','), 'low_confidence'), false) IS DISTINCT FROM (t.band_uncapped = 'contact' AND s.identity_confidence = 'low')
+  - name: operator_name_shape is listed exactly for would-be contacts whose signals row has operator_shape_t1 or operator_shape_t2 (the union, D10)
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE coalesce(list_contains(string_split(t.cap_reasons, ','), 'operator_name_shape'), false)
+      IS DISTINCT FROM (t.band_uncapped = 'contact' AND (s.operator_shape_t1 OR s.operator_shape_t2))
+  - name: a singleton, a low-confidence or an operator-named account is never in band contact (D8.2, D9.9 rule 4)
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE t.band = 'contact' AND (s.is_singleton OR s.identity_confidence = 'low' OR s.operator_shape_t1 OR s.operator_shape_t2)
+  # ---- M2 only: adjudication columns (D9.6 item 6, D9.9 rule 6) ------------------------------------------------------------------
+  - name: M2 only, final_band equals band on every row
+    sql: "SELECT count(*) FROM t WHERE final_band IS DISTINCT FROM band"
+  - name: M2 only, decision and prompt_version are null on every row
+    sql: "SELECT count(*) FROM t WHERE decision IS NOT NULL OR prompt_version IS NOT NULL"
+  # ---- why (D9.6 item 7, D10; safety wording) -----------------------------------------------------------------------------------
+  - name: every account has a non-empty, trimmed why
+    sql: "SELECT count(*) FROM t WHERE why IS NULL OR trim(why) = '' OR why <> trim(why)"
+  - name: why has at most 40 words (D9.6 item 7, D9.8)
+    sql: "SELECT count(*) FROM t WHERE len(string_split_regex(trim(why), '\\s+')) > 40"
+  - name: why contains no '=' and no '_' (no column names or formulas shown to a salesperson)
+    sql: "SELECT count(*) FROM t WHERE why LIKE '%=%' OR why LIKE '%\\_%' ESCAPE '\\'"
+  - name: why never claims a breach (breach, compromised, hacked; case-insensitive)
+    sql: "SELECT count(*) FROM t WHERE regexp_matches(lower(why), 'breach|compromised|hacked')"
+  - name: why of every would-be contact (band_uncapped = contact, not excluded) ends with the D10 clause, and no other account carries it
+    sql: >-
+      SELECT count(*) FROM t WHERE (band_uncapped = 'contact') IS DISTINCT FROM
+      ends_with(why, 'Not yet checked that this is an end-user organisation, not a network operator.')
+  - name: why of an excluded account is the honeypot text, and no other account carries it
+    sql: "SELECT count(*) FROM t WHERE (band = 'exclude') IS DISTINCT FROM starts_with(why, 'Mostly honeypot or attacker-infrastructure hosts (')"
+  # ---- top_signals (D9.6 item 7: names exist and are true in signals) -------------------------------------------------------------
+  - name: top_signals is null exactly when urgency_score is 0 or the account is excluded (no exposure signal, or excluded)
+    sql: "SELECT count(*) FROM t WHERE (top_signals IS NULL) IS DISTINCT FROM (urgency_score = 0 OR band = 'exclude')"
+  - name: top_signals holds one or two names from the nine scored signals, distinct
+    sql: >-
+      SELECT count(*) FROM t WHERE top_signals IS NOT NULL AND (NOT list_has_all(['kev_exposed', 'max_cvss_band', 'exposed_and_outdated',
+      'risky_non_ssh_exposed', 'risky_service_exposed', 'eol_stack', 'cert_expired_or_soon', 'legacy_tls', 'in_territory', 'footprint_band',
+      'sensitive_stack'], string_split(top_signals, ',')) OR len(string_split(top_signals, ',')) > 2
+      OR len(string_split(top_signals, ',')) <> len(list_distinct(string_split(top_signals, ','))))
+  - name: every name in top_signals is true in signals for that account
+    sql: >-
+      SELECT count(*) FROM (SELECT account_id, unnest(string_split(top_signals, ',')) AS tok FROM t WHERE top_signals IS NOT NULL) x
+      JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = x.account_id
+      WHERE NOT coalesce(CASE x.tok WHEN 'kev_exposed' THEN s.kev_exposed WHEN 'max_cvss_band' THEN s.max_cvss_band >= 1
+      WHEN 'exposed_and_outdated' THEN s.exposed_and_outdated WHEN 'risky_non_ssh_exposed' THEN s.risky_non_ssh_exposed
+      WHEN 'risky_service_exposed' THEN s.risky_service_exposed WHEN 'eol_stack' THEN s.eol_stack WHEN 'cert_expired_or_soon' THEN s.cert_expired_or_soon
+      WHEN 'legacy_tls' THEN s.legacy_tls WHEN 'in_territory' THEN s.in_territory WHEN 'footprint_band' THEN s.footprint_band >= 1
+      WHEN 'sensitive_stack' THEN s.sensitive_stack END, false)
