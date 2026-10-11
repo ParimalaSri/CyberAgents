@@ -63,3 +63,44 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   from the shell, so the check was not run.
 - Fix idea: add json options to the script (owner: whoever maintains the skill).
 - Contract rule: none.
+
+## RAW-010 DQ denylist check only understands the exact list
+- Symptom: `.claude/skills/data-quality-check/scripts/check_contract.py` `check_denylist` reads one list from the contract and
+  compares names; it has no word-boundary prefix rule, no pattern rule (CIDR/glob) and no normaliser (read from source, not run).
+  The denylist now has four files (exact, prefixes, patterns, cert defaults).
+- Root cause: the check was written for a single exact list.
+- Fix idea: data-quality-engineer extends the check to call `scripts/denylist_match.py` (normalise, load_exact, load_prefixes, matches_pattern).
+  Not edited by data-integrator (file is not in its write scope).
+- Contract rule: companies.company_name_normalised must match none of the four rule types.
+
+## RAW-011 Raw column set differs between samples
+- Symptom: head sample has 78 top-level columns, spread sample 85. 14 columns only in the spread sample (microsoft_exchange, openflow,
+  checkpoint, device, netbios, vendor, radius, qnap, rsync, afp, airplay, ipmi, ethereum_p2p, neo4j_browser, 1 to 20 rows each); 7 only in
+  the head sample (oracle_tnslsnr, philips_hue, ipp_cups, spotify_connect, ldap, fast_reverse_proxy, ntrip).
+- Root cause: read_json_auto infers the schema from the rows it samples; rare protocol structs appear in some rows only.
+- Fix idea: `1_clean` selects named columns with an explicit schema; do not rely on inference. Full-file column set is unknown.
+- Contract rule: hosts contract lists columns explicitly; unknown raw columns are ignored, not errors.
+
+## RAW-012 org field sometimes holds an address or a hostname pattern
+- Symptom: org = `139.162.0.0/16` on 62 spread rows (Linode / Akamai Connected Cloud space, reverse names `*.ip.linodeusercontent.com`);
+  63 rows have org or isp containing `se5-ptk` or `se3-ptk`.
+- Root cause (hypothesis): registry records without a proper organisation name.
+- Fix: those entries moved from `denylist.txt` to `context/denylist_patterns.txt` (CIDR matched on host IP and org text; globs on org/isp).
+- Contract rule: company names must not parse as an IP/CIDR (add to companies contract).
+
+## RAW-013 List-based denylist still leaks ISPs and hosting on the long tail
+- Symptom: after exact + prefix + pattern + D4 tag rules, 12,336 rows survive (12.34%); a keyword scan of org text
+  (telecom, telekom, telefon, broadband, internet service, chinanet, communications, mobile, cable, vpn, hosting, weebly, cloud, server)
+  matches 2,778 of them (22.5%). Examples: Internet Service Provider 65, Weebly 49, Mullvad VPN 35, Bretagne Telecom 29,
+  CHINANET jiangsu province network 27, EGIHosting 20, WHG Hosting Services 20.
+- Root cause: ISP/hosting names outside the hand-picked list; `cloud.provider` and `cloud`/`cdn` tags add only 6 rows beyond the lists.
+- Fix idea: owner decides on keyword families (telecom, telekom, chinanet, hosting, vpn) and on D2 treatment of Weebly. The keyword scan is a
+  heuristic and was not hand-verified, so some matches may be real companies. Not applied (no unapproved list changes).
+- Contract rule: companies row share outside 5-20% flagged (already planned); add a keyword-leakage warning.
+
+## RAW-014 Expectations in D3/section 10 not reproduced on the spread sample
+- Symptom: port 12304 is 0.22% (expected about 2%); infrastructure share 87.63% (expected about 86%); surviving 12.34% (expected about 10%).
+  Timestamp range 09:54:53 to 11:05:46 (about 71 min), the architecture doc says about 61 min.
+- Root cause (hypothesis): the 21-window probe (9,239 rows) was a small, clustered sample; the port-sweep burst is in only 53 of 1,000 blocks.
+- Fix idea: update ARCHITECTURE.md section 10/15 expectations (owner or senior-data-engineer). Full-file run will give the true values.
+- Contract rule: none; resolved-share range check stays 5% to 20%.

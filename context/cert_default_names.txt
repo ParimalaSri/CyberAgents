@@ -1,0 +1,68 @@
+# CyberIntel default / placeholder certificate organisation names (PROPOSED, not approved). Used by D4 rule 3 (cert_o):
+# a cert subject O that matches an entry (after normalise() in scripts/denylist_match.py) is NOT a tenant identity.
+# Source: ssl.cert.subject.O values seen in data/sample/spread_100k.jsonl (2,152 non-null; 849 distinct).
+# Also ignore any cert O that matches denylist.txt, denylist_prefixes.txt or denylist_patterns.txt (vendors, clouds).
+# Entries are already in normalised form (legal suffixes dropped, punctuation stripped).
+
+# --- placeholder / library defaults ---
+acme co
+default company
+internet widgits
+someorganization
+my company
+mycompany
+company
+companyname
+organization
+testorganization
+testcompany
+xx
+xxx
+none
+na
+unknown
+unspecified
+blah
+webserver
+certificate
+self signed
+self signed certificate
+temporary certificate
+mkcert development certificate
+system nodes
+kubernetes
+k3s
+
+# --- control panels and web servers that self-sign (name the software, not the owner) ---
+plesk
+parallels
+bt panel
+hestia control panel
+vesta control panel
+centos web panel
+fastpanel
+directadmin self signed
+dovecot mail server
+courier mail server
+serverbackup
+
+# --- network device and appliance vendors that self-sign on firmware (name the vendor, not the owner) ---
+https management certificate for sonicwall self signed
+pfsense webconfigurator self signed certificate
+netgate pfsense plus webconfigurator self signed certificate
+netgate pfsense plus gui default self signed certificate
+cisco systems
+fortinet
+synology
+draytek
+zyxel
+ubiquiti networks
+ubiquiti
+watchguard
+lancom systems
+hillstone networks
+qnap systems
+microhard systems
+ugreen
+eero
+hikvision

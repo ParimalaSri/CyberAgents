@@ -1,0 +1,53 @@
+# CyberIntel denylist PREFIX families (PROPOSED, not approved; decisions D1, D2, D4 in docs/ARCHITECTURE.md section 15).
+# Rule: a name matches when its NORMALISED form equals the entry or starts with the entry followed by a space
+# (word-boundary prefix). Normalise with scripts/denylist_match.py normalise(): lowercase, punctuation stripped,
+# trailing legal-suffix words removed. Example: "Palo Alto Networks, Inc." -> "palo alto networks" matches "palo alto".
+# Applies to org, isp and cloud.provider. Entries are already in normalised form.
+# Entries under 4 characters are NOT allowed here (exact-only in denylist.txt): ace, wix, ibm, ovh, aws, gtt.
+# Each family must be checked against distinct orgs before use (outputs/profile_spread_100k.md lists prefix-only hits).
+
+# --- hyperscaler / public cloud ---
+google
+amazon
+microsoft
+alibaba
+aliyun
+tencent
+huawei cloud
+huawei public cloud
+oracle
+ibm cloud
+softlayer
+digitalocean
+digital ocean
+vultr
+linode
+the constant company
+
+# --- CDN / edge / security proxy ---
+cloudflare
+akamai
+fastly
+incapsula
+imperva
+zscaler
+palo alto
+cdnetworks
+edgenext
+
+# --- hosting / VPS / website builders ---
+ovhcloud
+scaleway
+hetzner
+fly io
+shopify
+squarespace
+vercel
+bitly
+godaddy
+hostinger
+hostgator
+contabo
+netcup
+rackspace
+exoscale

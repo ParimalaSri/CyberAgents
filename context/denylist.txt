@@ -1,10 +1,19 @@
-# CyberIntel denylist candidates (PROPOSED, not approved).
-# One lowercase name per line. Match case-insensitively on org, isp, or cloud.provider.
-# Source: first 100,000 records of the raw dump (data/raw/sample_100k.jsonl); selected by hand from the
-# most frequent org/isp values, then grouped. Exact-match values only; the long tail (>5,000 distinct orgs)
-# is NOT covered and needs rule-based matching (see outputs/profile_sample_100k.md).
-# Human approval required before any pipeline stage uses this file.
-
+# CyberIntel denylist: EXACT-match list (PROPOSED, not approved). Human approval required before any stage uses it.
+# Format: one name per line. Compare after normalising BOTH sides with scripts/denylist_match.py normalise():
+#   lowercase, punctuation stripped, trailing legal-suffix words removed (inc, llc, ltd, gmbh, ...).
+# Match against org, isp and cloud.provider.
+# Source: first 100,000 records of the raw dump, hand-picked from the most frequent org/isp values, then grouped.
+# The long tail is covered by context/denylist_prefixes.txt (word-boundary prefix families) and the D4 tag rule below.
+# Related files: denylist_prefixes.txt (prefix rule), denylist_patterns.txt (CIDR/glob rule, not org names),
+#   cert_default_names.txt (default certificate organisations, used for D4 rule 3).
+#
+# D4 INFRASTRUCTURE RULE (docs/ARCHITECTURE.md section 15). A row is infrastructure if ANY of:
+#   1. org, isp or cloud.provider matches this exact list, the prefix list, or the pattern list;
+#   2. cloud.provider is non-null;
+#   3. a "cloud" or "cdn" tag is present.
+# Infrastructure rows never become companies; they are kept in hosts and counted in the D4 report.
+# Removals from this list are not allowed without owner approval (no entry may be weakened).
+# Moved out on 2026-10-11: 139.162.0.0/16, *se5-ptk*, *se3-ptk* are not org names, now in denylist_patterns.txt.
 
 # --- hyperscaler / public cloud ---
 google llc
@@ -139,9 +148,6 @@ strong technology, llc.
 cencom inc
 peg tech inc
 bitly inc
-139.162.0.0/16
-*se5-ptk*
-*se3-ptk*
 network solutions, llc
 server mania inc.
 liquid web, l.l.c
