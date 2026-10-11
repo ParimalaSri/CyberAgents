@@ -777,7 +777,7 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   1,963 rows, 169 distinct orgs, 1,216 distinct IPs. By isp: google 1,683 (58 orgs), ovh 94, amazon com 88, cloudflare 62, fastly 28,
   akamai 4, oracle 3, digitalocean 1. Tenancy evidence is almost absent: 1 row of 1,963 has a provider reverse-DNS or domain
   (`googleusercontent.com`, `amazonaws.com`, `cloudfront.net`, ovh/fastly/cloudflare names; the one is a person-named org);
-  0 of the 1,683 Google-isp rows carry any tag or a `cloud.provider` (all would have been excluded by the unchanged tag rules);
+  0 of the 1,683 Google-isp rows carry any tag (the group is defined as rows that pass the tag and `cloud.provider` rules, and none of the Google-isp rows has a tag at all);
   0 of them have a vulnerability (the group's 14 vulnerable rows are all non-Google); 278 of them (16.5%) have hostnames, and for
   Wal-Mart all 246 rows resolve to `walmart.com`. The top 5 Google-isp orgs hold 1,293 rows across 82 to 169 distinct IPs each, on
   scattered high ports, with no product fingerprint: the pattern of an organisation's own address block announced through a
