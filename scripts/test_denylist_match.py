@@ -144,6 +144,21 @@ def d5_followup_cases():
     return out
 
 
+def d6_cert_cases():
+    """Return assertions for the D6.4 cert default additions (vendors, carriers, name guard, dis) and for real tenants staying usable."""
+    defaults = dm.load_cert_defaults()
+    norm = dm.normalise
+    listed = [
+        "Huawei", "Huawei Technologies Co., Ltd", "Huawei Software Technologies Co., Ltd.", "Sierra Wireless, Inc.", "Ruckus Wireless Inc.",
+        "Aruba Networks", "Arista Networks, Inc.", "Mitel Networks Corporation", "Technicolor", "RAKwireless", "Comcast Corporation", "Comcast",
+        "NTT DOCOMO BUSINESS, Inc.", "天翼云科技有限公司", "Dis", "Meta Platforms, Inc.", "Facebook, Inc.", "Apple Inc.", "Netflix, Inc.",
+    ]
+    tenants = ["Accenture", "Okta, Inc.", "Datadog, Inc.", "SAP SE", "Salesforce, Inc.", "Royal Bank of Scotland", "Disney Enterprises, Inc", "Aruba S.p.A."]
+    out = [norm(name) in defaults for name in listed]
+    out.extend(norm(name) not in defaults for name in tenants)
+    return out
+
+
 def run_tests():
     """Run all matcher cases and return how many passed."""
     kw = ["hosting", "vpn", "internet service provider", "chinanet"]
@@ -201,6 +216,7 @@ def run_tests():
     cases.extend(accent_cases())
     cases.extend(isp_cases())
     cases.extend(d5_followup_cases())
+    cases.extend(d6_cert_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)
