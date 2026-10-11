@@ -1,4 +1,4 @@
-# Contract for the accounts gold layer (stage pipeline/4_score.py), 17 columns (docs/ARCHITECTURE.md D9.6 item 9, rules D9.9, amended by D10).
+# Contract for the accounts gold layer (stage pipeline/4_score.py), 17 columns (docs/ARCHITECTURE.md D9.6 item 9, rules D9.9, amended by D10 and D11).
 # Ranges come from MEANING, not from observed values (a score is 0 to 100, a band has its fixed set).
 # Run from the repo root (the cross-file checks use relative paths):
 #   python .claude/skills/data-quality-check/scripts/check_contract.py context/contracts/accounts.yml --report
@@ -6,11 +6,19 @@
 # why phrase and truth checks; sort order; the observed numbers table):
 #   python .claude/skills/data-quality-check/scripts/check_accounts_extra.py
 #
-# PROVISIONAL CONSTANTS (D9.7, D10): the checks below that name FLOOR (0.5), X (40) and Y (20) hard-code the provisional values. They are NOT
-# calibrated and NOT owner-approved. When scoring-calibration changes FLOOR, X or Y, change them in this file (the three checks marked
-# "PROVISIONAL" and the constants block of check_accounts_extra.py) in the same PR as section 3.4 of ARCHITECTURE.md; a contract changes
-# only with a reason. The checks that never change with calibration: 0 <= contact_score <= urgency_score, the score ranges, the band set,
-# the cap logic, the exclude rule (D9.3, decided), the why rules.
+# PROVISIONAL CONSTANTS (D9.7, D10, D11): FLOOR (0.5), X (40, contact threshold), Y (20, the FLOOR of the review band, D11.7) and REVIEW_N (200,
+# D11.2) are hard-coded in the checks marked "PROVISIONAL" below and in the constants block of check_accounts_extra.py. They are NOT calibrated
+# and NOT owner-approved: N = ceil(C / r) with placeholder C = 50 (rep capacity per week) and r = 0.25 (clearance rate); X and Y are the D9.7
+# starting point; territory points are 0 (D11.5) until the owner supplies the list. When scoring-calibration or the owner changes FLOOR, X, Y or N,
+# change them in this file (the checks marked "PROVISIONAL", including the `200 AS n` CTE of the three top-N checks) and in the constants
+# block of check_accounts_extra.py in the same PR as section 3.4 of ARCHITECTURE.md; a contract changes only with a reason. On the FULL run N is
+# derived from the prod ceiling and is not scaled from the sample (D9.8, D11.2). The checks that never change with calibration: 0 <= contact_score
+# <= urgency_score, the score ranges, the band set, the cap logic, the exclude rule (D9.3, decided), the why rules.
+# D11 BAND MODEL: band_uncapped is threshold-based (contact from X, review from Y, else skip). band is the stored band after the caps and the
+# D11.2 top-N rule: every would-be contact is held in review (cap), plus the best remaining non-excluded accounts by the total order
+# (contact_score, urgency_score, host_count descending, then account_id) until the band holds REVIEW_N rows, with the floor contact_score >= Y;
+# everything else non-excluded is skip. So band_uncapped = review with band = skip is legitimate (beyond the cut), cap_reasons exist only for
+# would-be contacts, and a skip why ends "Below the review cut-off." (D11.3).
 # STAGE-4 RULE, relaxed at M3: decision and prompt_version are all null and final_band = band, and no account is in `contact` while
 # decision is null (D10). llm/adjudicate.py may set decision, prompt_version and final_band = decision for band = review rows only; the
 # M3 PR must replace the checks marked "M2 only" by D9.9 rule 6 (decision null unless band = review; prompt_version null exactly when
@@ -42,7 +50,7 @@ columns:
   contact_score: {type: INTEGER, nullable: false, min: 0, max: 100}
   top_signals: {type: VARCHAR}                           # null for urgency 0 and for excluded accounts (check below)
   band_uncapped: {type: VARCHAR, nullable: false}
-  cap_reasons: {type: VARCHAR}                           # null exactly when band = band_uncapped
+  cap_reasons: {type: VARCHAR}                           # null exactly when band_uncapped is not contact (D11: only would-be contacts are capped)
   band: {type: VARCHAR, nullable: false}
   why: {type: VARCHAR, nullable: false}
   decision: {type: VARCHAR}                              # null until M3
@@ -104,7 +112,7 @@ checks:
     sql: >-
       SELECT count(*) FROM t WHERE band NOT IN ('contact', 'review', 'skip', 'exclude') OR band_uncapped NOT IN ('contact', 'review', 'skip', 'exclude')
       OR final_band NOT IN ('contact', 'review', 'skip', 'exclude')
-  - name: PROVISIONAL X = 40, Y = 20, band_uncapped follows contact_score (contact from 40, review from 20, else skip) for every non-excluded account
+  - name: PROVISIONAL X = 40, Y = 20, band_uncapped follows contact_score (contact from 40, review from 20, else skip) for every non-excluded account (threshold-based, before the top-N cut)
     sql: >-
       SELECT count(*) FROM t WHERE band_uncapped <> 'exclude' AND band_uncapped IS DISTINCT FROM
       (CASE WHEN contact_score >= 40 THEN 'contact' WHEN contact_score >= 20 THEN 'review' ELSE 'skip' END)
@@ -115,19 +123,33 @@ checks:
   - name: band_uncapped is exclude exactly when band is exclude (stage convention), and an excluded account has no cap_reasons
     sql: >-
       SELECT count(*) FROM t WHERE (band_uncapped = 'exclude') IS DISTINCT FROM (band = 'exclude') OR (band = 'exclude' AND cap_reasons IS NOT NULL)
-  - name: caps move contact to review only (band differs from band_uncapped only as contact to review; a cap never raises a band or lowers to skip)
-    sql: "SELECT count(*) FROM t WHERE band <> band_uncapped AND NOT (band_uncapped = 'contact' AND band = 'review')"
-  - name: cap_reasons is null exactly when band = band_uncapped (D9.9 rule 4)
-    sql: "SELECT count(*) FROM t WHERE (cap_reasons IS NULL) IS DISTINCT FROM (band = band_uncapped)"
+  - name: bands move only as a cap (band_uncapped contact to band review) or the top-N cut (band_uncapped review to band skip); never up, never contact to skip, never skip to review (D11.2)
+    sql: >-
+      SELECT count(*) FROM t WHERE band <> band_uncapped AND NOT ((band_uncapped = 'contact' AND band = 'review') OR (band_uncapped = 'review' AND band = 'skip'))
+  - name: every would-be contact is in band review (caps never drop a would-be contact; D11.2)
+    sql: "SELECT count(*) FROM t WHERE band_uncapped = 'contact' AND band <> 'review'"
+  - name: cap_reasons is null exactly when band_uncapped is not contact (a skip account may have band_uncapped review; only would-be contacts are capped; D11)
+    sql: "SELECT count(*) FROM t WHERE (cap_reasons IS NULL) IS DISTINCT FROM (band_uncapped <> 'contact')"
+  - name: PROVISIONAL N = 200, Y = 20, review is every would-be contact plus the non-excluded accounts with contact_score >= Y ranked by (contact_score, urgency_score, host_count desc, account_id) at rank N or better; excluded accounts take no slot (D11.2, recomputed in SQL)
+    sql: >-
+      WITH p AS (SELECT 200 AS n), r AS (SELECT band, band_uncapped, contact_score, row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC,
+      host_count DESC, account_id ASC) AS rn FROM t WHERE band_uncapped <> 'exclude')
+      SELECT count(*) FROM r WHERE (band = 'review') IS DISTINCT FROM (band_uncapped = 'contact' OR (contact_score >= 20 AND rn <= (SELECT n FROM p)))
+  - name: PROVISIONAL N = 200, Y = 20, the review band holds N rows (or every would-be contact when they exceed N, or every account with contact_score >= Y when fewer exist) (D11.2)
+    sql: >-
+      WITH p AS (SELECT 200 AS n), w AS (SELECT count(*) AS c FROM t WHERE band_uncapped = 'contact'), e AS (SELECT count(*) AS c FROM t WHERE band_uncapped = 'review')
+      SELECT abs((SELECT count(*) FROM t WHERE band = 'review') - ((SELECT c FROM w) + least(greatest((SELECT n FROM p) - (SELECT c FROM w), 0), (SELECT c FROM e))))
+  - name: PROVISIONAL Y = 20, N = 200, skip implies contact_score below Y or a rank beyond the cut (the weakest review account outranks every skip account with contact_score >= Y; D11.2)
+    sql: >-
+      WITH p AS (SELECT 200 AS n), r AS (SELECT band, band_uncapped, contact_score, row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC,
+      host_count DESC, account_id ASC) AS rn FROM t WHERE band_uncapped <> 'exclude')
+      SELECT count(*) FROM r WHERE band = 'skip' AND contact_score >= 20 AND rn <= (SELECT n FROM p)
   - name: no account is in band contact while decision is null (D10; only adjudication may clear a would-be contact)
     sql: "SELECT count(*) FROM t WHERE band = 'contact' AND decision IS NULL"
   - name: M2 only, band = review with band_uncapped = contact exactly when cap_reasons contains operator_unverified (D10)
     sql: >-
       SELECT count(*) FROM t WHERE (band = 'review' AND band_uncapped = 'contact')
       IS DISTINCT FROM coalesce(list_contains(string_split(cap_reasons, ','), 'operator_unverified'), false)
-  - name: skip implies contact_score below Y, review implies Y <= contact_score or a cap (PROVISIONAL Y = 20)
-    sql: >-
-      SELECT count(*) FROM t WHERE (band = 'skip' AND contact_score >= 20) OR (band = 'review' AND contact_score < 20 AND cap_reasons IS NULL)
   # ---- cap reasons (D9.6 item 5, D10) -------------------------------------------------------------------------------------------
   - name: cap_reasons holds only low_confidence, operator_name_shape, operator_unverified, singleton, comma separated, alphabetical, no duplicates, no spaces, never empty
     sql: >-
@@ -172,11 +194,31 @@ checks:
     sql: >-
       SELECT count(*) FROM t WHERE (band_uncapped = 'contact') IS DISTINCT FROM
       ends_with(why, 'Not yet checked that this is an end-user organisation, not a network operator.')
+  - name: why of every skip account with urgency above 0 ends with the D11.3 clause "Below the review cut-off.", and no other account carries it
+    sql: >-
+      SELECT count(*) FROM t WHERE (band = 'skip' AND urgency_score > 0) IS DISTINCT FROM ends_with(why, 'Below the review cut-off.')
+  - name: why of every review row whose name has the operator shape (signals operator_shape_t1 or operator_shape_t2) contains "Name looks like a network operator.", and no other row does (D9.6 item 7, D11.3)
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
+      WHERE (t.band = 'review' AND (s.operator_shape_t1 OR s.operator_shape_t2)) IS DISTINCT FROM contains(t.why, 'Name looks like a network operator.')
+  - name: why never uses the pre-D11 wording or a forbidden phrase (Exposure is limited, with a vulnerability on the CISA, worst vulnerability scores, located in, based in, is vulnerable, known-exploited host, has been exploited)
+    sql: >-
+      SELECT count(*) FROM t WHERE regexp_matches(lower(why), 'exposure is limited|with a vulnerability on the cisa|worst vulnerability scores|located in|based in|is vulnerable|known-exploited host|has been exploited')
+  - name: the KEV phrase "N host(s) running software whose version matches the CISA known-exploited list" is in why exactly when top_signals names kev_exposed (D11.3, RAW-006)
+    sql: >-
+      SELECT count(*) FROM t WHERE coalesce(list_contains(string_split(top_signals, ','), 'kev_exposed'), false)
+      IS DISTINCT FROM regexp_matches(why, '[0-9]+ hosts? running software whose version matches the CISA known-exploited list')
+  - name: the CVSS phrase "worst version-matched vulnerability scores CVSS X" is in why exactly when top_signals names max_cvss_band (D11.3, RAW-006)
+    sql: >-
+      SELECT count(*) FROM t WHERE coalesce(list_contains(string_split(top_signals, ','), 'max_cvss_band'), false)
+      IS DISTINCT FROM regexp_matches(why, '[Ww]orst version-matched vulnerability scores CVSS [0-9]+(\.[0-9]+)?')
   - name: why of an excluded account is the honeypot text, and no other account carries it
     sql: "SELECT count(*) FROM t WHERE (band = 'exclude') IS DISTINCT FROM starts_with(why, 'Mostly honeypot or attacker-infrastructure hosts (')"
   # ---- top_signals (D9.6 item 7: names exist and are true in signals) -------------------------------------------------------------
   - name: top_signals is null exactly when urgency_score is 0 or the account is excluded (no exposure signal, or excluded)
     sql: "SELECT count(*) FROM t WHERE (top_signals IS NULL) IS DISTINCT FROM (urgency_score = 0 OR band = 'exclude')"
+  - name: top_signals never names in_territory while territory carries 0 points (D11.5, PROVISIONAL until the owner supplies the list)
+    sql: "SELECT count(*) FROM t WHERE coalesce(list_contains(string_split(top_signals, ','), 'in_territory'), false)"
   - name: top_signals holds one or two names from the nine scored signals, distinct
     sql: >-
       SELECT count(*) FROM t WHERE top_signals IS NOT NULL AND (NOT list_has_all(['kev_exposed', 'max_cvss_band', 'exposed_and_outdated',
