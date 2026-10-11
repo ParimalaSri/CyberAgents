@@ -25,7 +25,8 @@ def normalise_windows_path(path):
         local = LOCAL_HOSTS + (socket.gethostname().lower(),)
         if host in local and len(share) == 2 and share[1] == "$" and share[0].isalpha():
             text = share[0] + ":/" + "/".join(pieces[4:])
-    return re.sub(r"::\$[^/]*", "", text)
+    text = re.sub(r"::\$[^/]*", "", text)
+    return "/".join(piece if piece in (".", "..") else piece.rstrip(". ") for piece in text.split("/"))
 
 
 def resolved_parts(path):
