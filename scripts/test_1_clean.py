@@ -175,6 +175,78 @@ class CleanStageTests(unittest.TestCase):
         self.assertEqual(counts["raw_rows"], 3)
         self.assertEqual(counts["out_rows"], 2)
 
+    def test_noise_module_pattern(self):
+        """Only the explicit RAT module names are noise; njrat78, xiaongmai-backdoor and 'moderate' are not."""
+        modules = ["blackshades", "njrat", "darktrack-rat", "ghost-rat", "rat", "njrat78", "xiaongmai-backdoor", "moderate", "ratio"]
+        rows, _, _ = run_rows([make_row(port=i + 1, _shodan={"module": m}) for i, m in enumerate(modules)])
+        by_port = {r["port"]: r for r in rows}
+        for i, module in enumerate(modules):
+            expected = module in ("blackshades", "njrat", "darktrack-rat", "ghost-rat", "rat")
+            self.assertEqual(by_port[i + 1]["is_noise"], expected, module)
+
+    def test_cert_o_keyword_and_vendor_rejected(self):
+        """A cert O that hits a keyword (telecom), a vendor default or the guard list is not usable; a real tenant is."""
+        def cert(name):
+            """Build an ssl struct with one subject O."""
+            return {"cert": {"expires": None, "issued": None, "expired": False, "subject": {"O": name, "CN": None}}, "versions": None}
+        rows, _, _ = run_rows([
+            make_row(port=1, org="Google LLC", ssl=cert("Bouygues Telecom")),
+            make_row(port=2, org="Google LLC", ssl=cert("Huawei Technologies")),
+            make_row(port=3, org="Google LLC", ssl=cert("Meta Platforms, Inc.")),
+            make_row(port=4, org="Google LLC", ssl=cert("Fiserv, Inc.")),
+        ])
+        by_port = {r["port"]: r for r in rows}
+        for port in (1, 2, 3):
+            self.assertEqual(by_port[port]["identity_source"], "infrastructure_unresolved", port)
+            self.assertIsNone(by_port[port]["name_norm"])
+        self.assertEqual(by_port[4]["identity_source"], "cert_o")
+
+    def test_cert_o_applicability(self):
+        """cert_o applies on infrastructure or null org, never when a non-infrastructure org exists (org wins)."""
+        cert_o = {"cert": {"expires": None, "issued": None, "expired": False, "subject": {"O": "Fiserv, Inc.", "CN": None}}, "versions": None}
+        rows, _, _ = run_rows([
+            make_row(port=1, org="Google LLC", ssl=cert_o),
+            make_row(port=2, org=None, ssl=cert_o),
+            make_row(port=3, org="Kent State University", ssl=cert_o),
+        ])
+        by_port = {r["port"]: r for r in rows}
+        self.assertEqual(by_port[1]["identity_source"], "cert_o")
+        self.assertEqual(by_port[2]["identity_source"], "cert_o")
+        self.assertEqual(by_port[3]["identity_source"], "org")
+        self.assertEqual(by_port[3]["cert_subject_o"], "Fiserv, Inc.")
+
+    def test_cert_date_invalid(self):
+        """cert_date_invalid is true when a present date was nulled, false for valid or absent dates."""
+        def cert(expires, issued):
+            """Build an ssl struct with the two dates."""
+            return {"cert": {"expires": expires, "issued": issued, "expired": False, "subject": {"O": None, "CN": None}}, "versions": None}
+        rows, _, _ = run_rows([
+            make_row(port=1, ssl=cert("40960101000000Z", "20250105120000Z")),
+            make_row(port=2, ssl=cert("20270105120000Z", "19700101000000Z")),
+            make_row(port=3, ssl=cert("20270105120000Z", "20250105120000Z")),
+            make_row(port=4, ssl=cert(None, None)),
+            make_row(port=5),
+            make_row(port=6, ssl=cert("garbage", None)),
+        ])
+        by_port = {r["port"]: r["cert_date_invalid"] for r in rows}
+        self.assertEqual(by_port, {1: True, 2: True, 3: False, 4: False, 5: False, 6: True})
+
+    def test_dup_count_totals(self):
+        """dup_count is at least 1 and sum(dup_count - 1) over kept rows equals the rows removed."""
+        rows, counts, _ = run_rows([make_row(), make_row(), make_row(), make_row(port=80), make_row(port=81), make_row(port=81)])
+        by_port = {r["port"]: r["dup_count"] for r in rows}
+        self.assertEqual(by_port, {443: 3, 80: 1, 81: 2})
+        self.assertEqual(sum(r["dup_count"] - 1 for r in rows), counts["flagged_rows"] - counts["out_rows"])
+
+    def test_vuln_cap_keeps_cvss_and_kev(self):
+        """The count cap never changes max_cvss or has_kev, even when the top CVE is the last of many."""
+        vulns = {f"CVE-2020-{i}": {"cvss": 4.0, "kev": False} for i in range(STAGE.VULN_COUNT_CAP * 3)}
+        vulns["CVE-2099-1"] = {"cvss": 10.0, "kev": True}
+        rows, _, _ = run_rows([make_row(vulns=vulns)])
+        self.assertEqual(rows[0]["vuln_count"], STAGE.VULN_COUNT_CAP)
+        self.assertEqual(rows[0]["max_cvss"], 10.0)
+        self.assertTrue(rows[0]["has_kev"])
+
 
 if __name__ == "__main__":
     unittest.main()

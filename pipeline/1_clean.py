@@ -18,7 +18,7 @@ MATCHER_PATH = ROOT / "scripts" / "denylist_match.py"
 MAX_OBJECT_SIZE = 33554432  # RAW-009
 NOISE_TAGS = ("honeypot", "c2", "tor", "compromised")  # D4 rule 1
 INFRA_TAGS = ("cloud", "cdn")  # D4 rule 2
-RAT_MODULE_SUFFIX = "rat"  # D4 rule 1: _shodan.module ending in "rat" (darktrack-rat, njrat, ...)
+NOISE_MODULE_REGEX = r"(^|-)rat$|^njrat$|^blackshades$"  # D6.1: explicit RAT module names; njrat78 and xiaongmai-backdoor are not noise
 CERT_YEAR_MIN = 1990  # RAW-007: certificate dates outside this window are sentinels
 CERT_YEAR_MAX = 2100
 CERT_DATE_FORMAT = "%Y%m%d%H%M%SZ"
@@ -44,10 +44,10 @@ OUTPUT_COLUMNS = (
     ("org", "VARCHAR"), ("org_norm", "VARCHAR"), ("isp", "VARCHAR"), ("asn", "VARCHAR"),
     ("country_code", "VARCHAR"), ("product", "VARCHAR"), ("version", "VARCHAR"), ("os", "VARCHAR"),
     ("cpe", "VARCHAR[]"), ("tags", "VARCHAR[]"), ("cloud_provider", "VARCHAR"), ("shodan_module", "VARCHAR"),
-    ("cert_expires", "TIMESTAMP"), ("cert_issued", "TIMESTAMP"), ("cert_expired", "BOOLEAN"),
+    ("cert_expires", "TIMESTAMP"), ("cert_issued", "TIMESTAMP"), ("cert_expired", "BOOLEAN"), ("cert_date_invalid", "BOOLEAN"),
     ("cert_subject_o", "VARCHAR"), ("cert_subject_cn", "VARCHAR"), ("ssl_versions", "VARCHAR[]"),
     ("max_cvss", "DOUBLE"), ("has_kev", "BOOLEAN"), ("vuln_count", "INTEGER"),
-    ("hostnames", "VARCHAR[]"), ("domains", "VARCHAR[]"), ("hostnames_count", "INTEGER"), ("domains_count", "INTEGER"),
+    ("hostnames", "VARCHAR[]"), ("domains", "VARCHAR[]"), ("hostnames_count", "INTEGER"), ("domains_count", "INTEGER"), ("dup_count", "INTEGER"),
     ("is_noise", "BOOLEAN"), ("is_infrastructure", "BOOLEAN"), ("infra_reason", "VARCHAR"),
     ("identity_source", "VARCHAR"), ("name_norm", "VARCHAR"),
 )
@@ -107,8 +107,8 @@ def build_lookup_tables(con, matcher, rules):
     cert_rows = []
     for (cert_o,) in con.execute("SELECT DISTINCT ssl.cert.subject.O FROM raw WHERE ssl.cert.subject.O IS NOT NULL").fetchall():
         norm = matcher.normalise(cert_o)
-        hit = matcher.match_name(cert_o, "org", rules)  # cert_default_names.txt: denylist exact, prefix and pattern rules, not keywords
-        vendor = bool(hit) and hit[0] != "keyword"
+        hit = matcher.match_name(cert_o, "org", rules)  # D6.4: cert_default_names.txt plus every denylist rule type, keywords included
+        vendor = bool(hit)
         cert_rows.append((cert_o, norm, bool(norm) and norm not in defaults and not vendor))
     con.execute("CREATE OR REPLACE TABLE cert_lookup(cert_o VARCHAR, cert_norm VARCHAR, cert_usable BOOLEAN)")
     insert_rows(con, "cert_lookup", 3, cert_rows)
@@ -147,6 +147,8 @@ def build_flagged(con, rules):
             {cert_date('ssl.cert.expires')} AS cert_expires,
             {cert_date('ssl.cert.issued')} AS cert_issued,
             ssl.cert.expired AS cert_expired,
+            (ssl.cert.expires IS NOT NULL AND {cert_date('ssl.cert.expires')} IS NULL)
+                OR (ssl.cert.issued IS NOT NULL AND {cert_date('ssl.cert.issued')} IS NULL) AS cert_date_invalid,
             nullif(trim(ssl.cert.subject.O), '') AS cert_subject_o,
             nullif(trim(ssl.cert.subject.CN), '') AS cert_subject_cn,
             ssl.versions AS ssl_versions,
@@ -176,7 +178,7 @@ def build_flagged(con, rules):
             WHERE t.host_ip IS NOT NULL
         ), reasoned AS (
             SELECT *,
-                coalesce(lower(shodan_module) LIKE '%{RAT_MODULE_SUFFIX}', false) OR tag_noise AS is_noise,
+                coalesce(regexp_matches(lower(shodan_module), '{NOISE_MODULE_REGEX}'), false) OR tag_noise AS is_noise,
                 CASE WHEN cloud_provider IS NOT NULL AND cloud_provider <> '' THEN 'cloud_provider'
                      WHEN tag_infra THEN 'tag_rule'
                      WHEN {pattern_sql} THEN 'ip_pattern'
@@ -203,7 +205,7 @@ def dedupe_and_select(con):
         SELECT {names},
             CASE identity_source WHEN 'org' THEN org_norm WHEN 'cert_o' THEN cert_norm END AS name_norm
         FROM (
-            SELECT *, row_number() OVER (
+            SELECT *, count(*) OVER (PARTITION BY host_ip, port, transport)::INTEGER AS dup_count, row_number() OVER (
                 PARTITION BY host_ip, port, transport
                 ORDER BY timestamp DESC NULLS LAST, hash(org, isp, product, version, shodan_module, cert_subject_o, cast(tags AS VARCHAR)) DESC
             ) AS rn
@@ -260,6 +262,12 @@ def print_flag_report(con, counts):
     print(f"  sum of shares: {sum(pct for _, _, pct in shares):.2f}%")
     noise = con.execute("SELECT count(*) FROM out WHERE is_noise").fetchone()[0]
     print(f"is_noise rows: {noise:,} ({100 * noise / total:.2f}%)")
+    dup_extra = con.execute("SELECT coalesce(sum(dup_count - 1), 0) FROM out").fetchone()[0]
+    removed = pre - total
+    print(f"sum(dup_count - 1) over kept rows: {dup_extra:,}; rows removed by dedupe: {removed:,}; equal: {dup_extra == removed}")
+    invalid = con.execute("SELECT count(*) FROM out WHERE cert_date_invalid").fetchone()[0]
+    invalid_pre = con.execute("SELECT count(*) FROM flagged WHERE cert_date_invalid").fetchone()[0]
+    print(f"cert_date_invalid rows: {invalid:,} after dedupe, {invalid_pre:,} before dedupe")
 
 
 def print_report(con, counts, input_path, output_path, compressed):
