@@ -1,6 +1,9 @@
 """Unit tests for pipeline/4_score.py on a tiny synthetic signals parquet (stdlib unittest, DuckDB, no pandas)."""
 import importlib.util
 import itertools
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,6 +34,14 @@ DEFAULTS = {
 }
 COLUMNS = tuple(DEFAULTS)
 LAST_CON = []  # the DuckDB connection of the latest run_scores call, so a test can read the scored table and call report sections
+
+
+class QuietReport(STAGE.Report):
+    """A Report that collects lines without printing them, so the test run stays quiet."""
+
+    def add(self, text=""):
+        """Keep one line without printing it."""
+        self.lines.append(text)
 
 
 def sig(company_id, **over):
@@ -233,7 +244,7 @@ class BandTests(unittest.TestCase):
         finally:
             STAGE.run_stage, STAGE.print_report = original
             sys.argv = old
-        with self.assertRaises(AssertionError):
+        with self.assertRaises(ValueError):
             run_scores([sig("a")], contact=20, review=20)
 
     def strong(self, **over):
@@ -424,7 +435,7 @@ class ReviewBandTests(unittest.TestCase):
         flagged = sig("a_flagged", company_name="Flagged Co", kev_exposed=True, kev_host_count=9, footprint_band=3, host_count=50, operator_shape_t2=True)
         plain = sig("z_plain", company_name="Plain Co", kev_exposed=True, kev_host_count=1, footprint_band=1, host_count=2)
         run_scores([flagged, plain], review_n=1)
-        rep = STAGE.Report()
+        rep = QuietReport()
         STAGE.section_top(LAST_CON[0], rep, 2)
         text = "\n".join(rep.lines)
         self.assertLess(text.index("Plain Co"), text.index("Flagged Co"))
@@ -448,13 +459,13 @@ class ReviewBandTests(unittest.TestCase):
         """The cut section names the score at the cut and the tie size and how many tied accounts are kept."""
         rows = [sig(f"t{i}", kev_exposed=True, footprint_band=1, host_count=2 + i) for i in range(4)] + [sig("top", **self.strong())]
         run_scores(rows, review_n=3)  # would-be 1, N = 3: two of the four tied accounts (contact 29) are kept
-        rep = STAGE.Report()
+        rep = QuietReport()
         STAGE.section_cut(LAST_CON[0], rep, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 3)
         text = "\n".join(rep.lines)
         self.assertIn("contact_score 29: 4 non-excluded accounts are tied at 29, 2 are kept in review and 2 go to skip", text)
         self.assertIn("tie broken by urgency_score, operator_name_shape (false first), kev_host_count, host_count, account_id", text)
         self.assertIn("Kept at the cut: Acme (unflagged, 5 hosts, 0 KEV hosts)", text)
-        rep = STAGE.Report()
+        rep = QuietReport()
         STAGE.section_cut(LAST_CON[0], rep, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 1)
         self.assertIn("the band is the would-be contacts only", "\n".join(rep.lines))
 
@@ -662,6 +673,188 @@ class OutputShapeTests(unittest.TestCase):
         """--full has its own default paths so it cannot overwrite the sample output."""
         self.assertNotEqual(STAGE.FULL_OUTPUT_PATH, STAGE.OUTPUT_PATH)
         self.assertNotEqual(STAGE.FULL_INPUT_PATH, STAGE.INPUT_PATH)
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def run_cli(args, env=None, flags=()):
+    """Run the stage script as a subprocess and return the completed process (text output, UTF-8 decoded)."""
+    return subprocess.run([sys.executable, *flags, str(STAGE_PATH), *map(str, args)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=dict(os.environ, **(env or {})))
+
+
+def write_signals(path, rows):
+    """Write signal row dicts as a signals parquet at path (an empty list gives a valid zero-row file)."""
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE s ({SIGNAL_DDL})")
+    for row in rows:
+        con.execute(f"INSERT INTO s VALUES ({','.join('?' * 36)})", [row["company_id"]] + [row[c] for c in COLUMNS])
+    con.execute(f"COPY s TO '{Path(path).as_posix()}' (FORMAT PARQUET)")
+
+
+def why_row(**over):
+    """Return a row dict for build_why: a review account with a KEV signal and an exposed-and-outdated signal (34 words before any clause)."""
+    row = dict(band="review", noise_host_count=0, host_count=5, cap_reasons=None, operator_name_shape=False, urgency_score=50,
+               p_vuln=50, vuln_signal="kev_exposed", kev_host_count=3, max_cvss=9.8, p_expo=30, expo_signal="exposed_and_outdated",
+               risky_ports=[22, 3389], p_eol=0, eol_host_count=0, p_cert=0, cert_issue_host_count=0, p_legacy=0, legacy_tls_host_count=0,
+               p_footprint=0, distinct_host_ips=5, p_territory=0, country_code="DE", p_sensitive=0)
+    row.update(over)
+    return row
+
+
+class BandEdgeTests(unittest.TestCase):
+    """QA finding 4: the band edges are inclusive, pinned with accounts exactly at the thresholds."""
+
+    def five_at_eight(self, **kwargs):
+        """Score five accounts that each have contact_score 8 (RDP exposed only, fit 0) and return the rows by id."""
+        rows = [sig(c, risky_service_exposed=True, risky_non_ssh_exposed=True, risky_ports=[3389]) for c in "abcde"]
+        accounts, _, _, _ = run_scores(rows, **kwargs)
+        self.assertEqual({a["contact_score"] for a in accounts.values()}, {8})
+        return accounts
+
+    def test_would_be_contact_exactly_at_contact_threshold(self):
+        """Five accounts at 8 with --contact 8 are all would-be contacts (held in review) even with N = 1; with --contact 9 only N = 1 reaches review."""
+        accounts = self.five_at_eight(contact=8, review=1, review_n=1)
+        self.assertEqual([accounts[c]["band_uncapped"] for c in "abcde"], ["contact"] * 5)
+        self.assertEqual([accounts[c]["band"] for c in "abcde"], ["review"] * 5)
+        accounts = self.five_at_eight(contact=9, review=1, review_n=1)
+        self.assertEqual([accounts[c]["band_uncapped"] for c in "abcde"], ["review"] * 5)  # band_uncapped ignores the top-N cut
+        self.assertEqual([accounts[c]["band"] for c in "abcde"], ["review", "skip", "skip", "skip", "skip"])
+
+    def test_review_floor_exactly_at_review_threshold(self):
+        """Accounts at 8 reach review with --review 8 and fall to skip with --review 9 (the floor is inclusive)."""
+        accounts = self.five_at_eight(contact=20, review=8, review_n=10)
+        self.assertEqual([accounts[c]["band"] for c in "abcde"], ["review"] * 5)
+        accounts = self.five_at_eight(contact=20, review=9, review_n=10)
+        self.assertEqual([accounts[c]["band"] for c in "abcde"], ["skip"] * 5)
+
+
+class WhyLimitTests(unittest.TestCase):
+    """QA finding 6: the 40-word limit pinned with literal numbers, not derived from the constant."""
+
+    def test_forty_words_accepted(self):
+        """A why of exactly 40 words keeps both signals."""
+        top, why = STAGE.build_why(why_row(cap_reasons="low_confidence"))
+        self.assertEqual(len(why.split()), 40)
+        self.assertEqual(top, "kev_exposed,exposed_and_outdated")
+        self.assertTrue(why.endswith("Named only by a TLS certificate."))
+
+    def test_forty_one_words_cut_to_one_signal(self):
+        """A why that would be 41 words drops to one signal and ends within 40 words."""
+        top, why = STAGE.build_why(why_row(band="skip", vuln_signal="max_cvss_band", max_cvss=9.8))
+        self.assertEqual(top, "max_cvss_band")
+        self.assertEqual(why, "Worst version-matched vulnerability scores CVSS 9.8. Ranked below this run's review list; a rank, not a judgement of risk.")
+        self.assertLessEqual(len(why.split()), 40)
+
+    def test_limit_constant_is_forty(self):
+        """The limit itself is 40 (D9.6 item 7)."""
+        self.assertEqual(STAGE.WHY_MAX_WORDS, 40)
+
+
+class ArgumentErrorTests(unittest.TestCase):
+    """QA finding 9: threshold and review-n checks are explicit argument errors that survive python -O."""
+
+    def refused(self, args, text, flags=()):
+        """Assert the CLI exits with code 2 and an error message containing text, writing no output file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp, "o.parquet")
+            result = run_cli(["--input", Path(tmp, "none.parquet"), "--output", out, *args], flags=flags)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn(text, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out.exists())
+
+    def test_contact_below_review(self):
+        """--contact below --review, and equal, are refused."""
+        self.refused(["--contact", "10", "--review", "50"], "must be below --contact")
+        self.refused(["--contact", "20", "--review", "20"], "must be below --contact")
+
+    def test_negative_review_n(self):
+        """A negative --review-n is refused with a message."""
+        self.refused(["--review-n", "-1"], "must not be negative")
+
+    def test_non_integer_inputs(self):
+        """Non-integer thresholds and N are refused by the argument parser."""
+        self.refused(["--contact", "40.5"], "invalid int value")
+        self.refused(["--review", "abc"], "invalid int value")
+        self.refused(["--review-n", "1e3"], "invalid int value")
+
+    def test_checks_survive_python_optimise_flag(self):
+        """With python -O (asserts removed) the refusals still happen."""
+        self.refused(["--contact", "10", "--review", "50"], "must be below --contact", flags=("-O",))
+        self.refused(["--review-n", "-5"], "must not be negative", flags=("-O",))
+
+    def test_run_stage_rejects_bad_values(self):
+        """run_stage itself raises ValueError (not an assert) for a bad pair and for a negative N."""
+        for kwargs in ({"contact": 20, "review": 30}, {"review_n": -1}):
+            with self.assertRaises(ValueError):
+                run_scores([sig("a")], **kwargs)
+
+
+class CliRobustnessTests(unittest.TestCase):
+    """QA findings 2, 3, 7, 8 for the accounts stage: zero rows, report path, UTF-8 report, output path guard."""
+
+    def test_zero_row_signals_complete(self):
+        """An empty signals parquet gives exit code 0, a valid zero-row accounts file and a readable report."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "signals.parquet"), Path(tmp, "accounts.parquet")
+            write_signals(src, [])
+            result = run_cli(["--input", src, "--output", out])
+            self.assertEqual(result.returncode, 0, result.stderr[-500:])
+            con = duckdb.connect()
+            self.assertEqual(con.execute(f"SELECT count(*) FROM read_parquet('{out.as_posix()}')").fetchone()[0], 0)
+            self.assertIn("0 rows", result.stdout)
+            self.assertTrue(Path(tmp, "accounts_stage_report.md").exists())
+
+    def test_report_goes_next_to_scratch_output(self):
+        """With a non-default --output and no --report the report sits beside the output; the committed dq folder is untouched."""
+        dq = ROOT_DIR / "outputs" / "dq"
+        before = sorted((f.name, f.stat().st_mtime_ns) for f in dq.glob("accounts_stage_*.md")) if dq.exists() else []
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "signals.parquet"), Path(tmp, "sub", "accounts.parquet")
+            write_signals(src, [sig("a", max_cvss_band=3)])
+            result = run_cli(["--input", src, "--output", out])
+            self.assertEqual(result.returncode, 0, result.stderr[-500:])
+            self.assertTrue(Path(tmp, "sub", "accounts_stage_report.md").exists())
+            custom = Path(tmp, "elsewhere", "my_report.md")
+            result = run_cli(["--input", src, "--output", out, "--report", custom])
+            self.assertEqual(result.returncode, 0, result.stderr[-500:])
+            self.assertTrue(custom.exists())
+        after = sorted((f.name, f.stat().st_mtime_ns) for f in dq.glob("accounts_stage_*.md")) if dq.exists() else []
+        self.assertEqual(before, after)
+
+    def test_default_output_keeps_committed_report_path(self):
+        """With the default output the report path is the committed outputs/dq path."""
+        guard = STAGE.load_guard()
+        default_report = STAGE.REPORT_DIR / "accounts_stage_2026-01-01.md"
+        self.assertEqual(guard.choose_report_path(str(STAGE.OUTPUT_PATH), STAGE.OUTPUT_PATH, None, default_report, "accounts"), default_report)
+        self.assertEqual(guard.choose_report_path("scratch/a.parquet", STAGE.OUTPUT_PATH, None, default_report, "accounts").name, "accounts_stage_report.md")
+
+    def test_cjk_name_under_cp1252_pipe(self):
+        """A CJK company name does not break the report under the default Windows pipe encoding."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "signals.parquet"), Path(tmp, "accounts.parquet")
+            write_signals(src, [sig("a", company_name="\u682a\u5f0f\u4f1a\u793e\u30c6\u30b9\u30c8", max_cvss_band=3)])
+            env = {"PYTHONIOENCODING": "cp1252"}
+            result = run_cli(["--input", src, "--output", out], env=env)
+            self.assertEqual(result.returncode, 0, result.stderr[-500:])
+            self.assertTrue(out.exists())
+
+    def test_output_under_raw_or_dataset_folder_refused(self):
+        """Outputs under data/raw (plain, with .., upper case) and under the dataset folder are refused and nothing is written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "signals.parquet")
+            write_signals(src, [sig("a")])
+            targets = [ROOT_DIR / "data" / "raw" / "qa_guard_test.parquet",
+                       str(ROOT_DIR / "data" / "silver" / ".." / "raw" / "qa_guard_test.parquet"),
+                       str(ROOT_DIR / "DATA" / "RAW" / "qa_guard_test.parquet"),
+                       "D:/Cyber_DataSet/qa_guard_test.parquet", "d:/CYBER_DATASET/sub/../qa_guard_test.parquet"]
+            for target in targets:
+                result = run_cli(["--input", src, "--output", target])
+                self.assertNotEqual(result.returncode, 0, str(target))
+                self.assertIn("refusing to write", result.stderr, str(target))
+                self.assertFalse(Path(target).exists(), str(target))
 
 
 if __name__ == "__main__":

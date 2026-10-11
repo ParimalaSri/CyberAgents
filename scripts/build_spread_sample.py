@@ -6,6 +6,9 @@ import random
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import path_guard  # noqa: E402
+
 
 def is_under(path, folder):
     """Return True when path is inside folder (both resolved)."""
@@ -62,6 +65,7 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
     check_out_path(args.src, args.out)
+    path_guard.check_output_path(args.out)
     size = os.path.getsize(args.src)
     offsets = make_positions(size, args.positions, args.seed)
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

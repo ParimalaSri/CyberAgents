@@ -15,6 +15,7 @@ OUTPUT_PATH = ROOT / "data" / "gold" / "accounts.parquet"
 FULL_INPUT_PATH = ROOT / "data" / "gold" / "signals_full.parquet"
 FULL_OUTPUT_PATH = ROOT / "data" / "gold" / "accounts_full.parquet"
 REPORT_DIR = ROOT / "outputs" / "dq"
+GUARD_SCRIPT = ROOT / "scripts" / "path_guard.py"
 REPORT_SCRIPT = ROOT / ".claude" / "skills" / "pipeline-stage-build" / "scripts" / "stage_report.py"
 DISTRIBUTION_SCRIPT = ROOT / ".claude" / "skills" / "scoring-calibration" / "scripts" / "score_distribution.py"
 
@@ -94,6 +95,14 @@ def stage_order_sql(id_col="account_id", score="contact_score", scored="", flags
     """Return the D12.1 total-order ORDER BY list: score DESC, urgency DESC, operator_name_shape ASC, coalesce(kev_host_count, 0) DESC, host_count DESC, id ASC; scored and flags are column prefixes."""
     return (f"{score} DESC, {scored}urgency_score DESC, {flags}operator_name_shape ASC, coalesce({flags}kev_host_count, 0) DESC, "
             f"{scored}host_count DESC, {id_col} ASC")
+
+
+def load_guard():
+    """Import the shared output-path guard from scripts/ by file path (it is not a package)."""
+    spec = importlib.util.spec_from_file_location("path_guard", GUARD_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def quote_path(path):
@@ -301,8 +310,10 @@ def write_output(con, output_path):
 
 def run_stage(con, input_path, output_path, contact=THRESHOLD_CONTACT, review=THRESHOLD_REVIEW, review_n=REVIEW_N):
     """Score, band, explain and write one signals file; return the row counts."""
-    assert review < contact, "review threshold must be below the contact threshold"
-    assert review_n >= 0, "review_n must not be negative"
+    if review >= contact:
+        raise ValueError(f"review threshold ({review}) must be below the contact threshold ({contact})")
+    if review_n < 0:
+        raise ValueError(f"review_n ({review_n}) must not be negative")
     build_scored(con, input_path, contact, review, review_n)
     build_accounts(con)
     write_output(con, output_path)
@@ -540,13 +551,24 @@ def main():
     parser.add_argument("--contact", type=int, default=THRESHOLD_CONTACT, help="contact threshold X (provisional default)")
     parser.add_argument("--review", type=int, default=THRESHOLD_REVIEW, help="review threshold Y, the floor of the top-N review band (provisional default)")
     parser.add_argument("--review-n", type=int, default=REVIEW_N, help="N: total accounts in the review band, would-be contacts always kept (provisional default)")
+    parser.add_argument("--report", help="report markdown path (default: outputs/dq for the default output, else next to --output)")
     args = parser.parse_args()
+    guard = load_guard()
+    guard.use_utf8_output()
+    if args.review >= args.contact:
+        parser.error(f"--review ({args.review}) must be below --contact ({args.contact})")
+    if args.review_n < 0:
+        parser.error(f"--review-n ({args.review_n}) must not be negative")
     input_path = args.input or (FULL_INPUT_PATH if args.full else INPUT_PATH)
     output_path = args.output or (FULL_OUTPUT_PATH if args.full else OUTPUT_PATH)
     report_name = f"accounts_stage_{'full_' if args.full else ''}{datetime.date.today().isoformat()}.md"
+    default_output = FULL_OUTPUT_PATH if args.full else OUTPUT_PATH
+    report_path = guard.choose_report_path(output_path, default_output, args.report, REPORT_DIR / report_name, "accounts")
+    guard.check_output_path(output_path)
+    guard.check_output_path(report_path)
     con = duckdb.connect()
     run = run_stage(con, input_path, output_path, args.contact, args.review, args.review_n)
-    print_report(con, run, output_path, REPORT_DIR / report_name, args.contact, args.review, args.review_n)
+    print_report(con, run, output_path, report_path, args.contact, args.review, args.review_n)
 
 
 if __name__ == "__main__":
