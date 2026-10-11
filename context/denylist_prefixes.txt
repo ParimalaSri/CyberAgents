@@ -61,3 +61,17 @@ contabo
 netcup
 rackspace
 exoscale
+
+# --- named network operators / hosting providers, D6.7 (d); each family has >= 20 rows in the spread sample; gate 38/39 = 97.4% (outputs/denylist_cleanup_review.md section 8) ---
+racknerd
+ntt america
+ionos
+telstra
+vodafone
+fastweb
+uninet
+cliente antel
+web com
+psinet
+comcast
+cloudfly

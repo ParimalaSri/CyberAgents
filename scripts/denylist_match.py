@@ -61,12 +61,17 @@ def load_prefixes(path=None):
 
 KEYWORD_SCOPES = ("org",)
 KEYWORD_FIELDS = ("org", "isp")
+# D6.7 compound words: a keyword written with a leading "*" (for example "org: *hosting") matches a single TOKEN of the normalised text that ENDS with
+# the word and has a non-empty stem (webhosting, egihosting, bisecthosting, ahosting). It is NOT a substring match: the word must close the token, so
+# "hostingbazis" is not matched, and a token listed in COMPOUND_EXCLUDE is never matched (ghosting is an English word, not a host).
+COMPOUND_EXCLUDE = frozenset({"ghosting"})
 
 
 class Keyword(str):
     """A normalised keyword phrase (a str) with a field scope: 'org' (org text only) or 'any' (org text, and isp text only in the old "exclude" mode)."""
 
     scope = "any"
+    mode = "word"
 
 
 def parse_keyword_entry(entry):
@@ -79,8 +84,15 @@ def parse_keyword_entry(entry):
         text = rest
         if scope not in KEYWORD_SCOPES:
             raise ValueError("unknown keyword scope " + repr(scope) + " in line: " + entry)
+    mode = "word"
+    if text.strip().startswith("*"):
+        mode = "suffix"
+        text = text.strip()[1:]
     keyword = Keyword(normalise(text))
+    if mode == "suffix" and (" " in keyword or not keyword):
+        raise ValueError("a compound (*) keyword must be exactly one word in line: " + entry)
     keyword.scope = scope
+    keyword.mode = mode
     return keyword
 
 
@@ -90,8 +102,8 @@ def load_keywords(path=None):
     seen = set()
     for entry in read_entries(path or CONTEXT_DIR / "denylist_keywords.txt"):
         keyword = parse_keyword_entry(entry)
-        if keyword and (str(keyword), keyword.scope) not in seen:
-            seen.add((str(keyword), keyword.scope))
+        if keyword and (str(keyword), keyword.scope, keyword.mode) not in seen:
+            seen.add((str(keyword), keyword.scope, keyword.mode))
             result.append(keyword)
     return result
 
@@ -120,14 +132,18 @@ def matches_prefix(normalised, prefixes):
 
 
 def matches_keyword(normalised, keywords, field="org"):
-    """Return the first keyword whose words appear as a whole-word run in the text of `field` ('org' or 'isp'), else None; org-scoped keywords only match field 'org' (the default pipeline mode never passes 'isp')."""
+    """Return the first keyword whose words appear as a whole-word run (or, for a compound "*" keyword, as the end of one token) in the text of `field` ('org' or 'isp'), else None; org-scoped keywords only match field 'org' (the default pipeline mode never passes 'isp')."""
     if field not in KEYWORD_FIELDS:
         raise ValueError("field must be one of " + ", ".join(KEYWORD_FIELDS))
     padded = " " + normalised + " "
     for keyword in keywords:
         if getattr(keyword, "scope", "any") == "org" and field != "org":
             continue
-        if " " + keyword + " " in padded:
+        if getattr(keyword, "mode", "word") == "suffix":
+            for token in normalised.split():
+                if token.endswith(keyword) and len(token) > len(keyword) and token not in COMPOUND_EXCLUDE:
+                    return keyword
+        elif " " + keyword + " " in padded:
             return keyword
     return None
 

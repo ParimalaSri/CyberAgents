@@ -159,6 +159,59 @@ def d6_cert_cases():
     return out
 
 
+def d6_gate_cases():
+    """Return assertions for the D6.7 rules: org-scoped unicom and province network, the compound *hosting keyword and the named operator prefixes."""
+    rules = dm.load_rules()
+    norm = dm.normalise
+    match = dm.match_name
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = [
+        match("China Unicom Henan province network", "org", rules) == ("keyword", "unicom"),
+        match("UNICOM ZheJiang Province Network", "org", rules) == ("keyword", "unicom"),
+        match("CNCGROUP Zhejiang Province Network", "org", rules) == ("keyword", "province network"),
+        match("Unicomer Group", "org", rules) is None,
+        match("China Unicom Henan province network", "isp", rules) is None,
+        ("unicom", "org") in [(str(k), k.scope) for k in rules["keywords"]],
+        ("province network", "org") in [(str(k), k.scope) for k in rules["keywords"]],
+    ]
+    star = dm.parse_keyword_entry("org: *hosting")
+    out.append(star == "hosting" and star.scope == "org" and star.mode == "suffix")
+    out.append(dm.parse_keyword_entry("hosting").mode == "word")
+    for name in ["EGIHosting", "webhosting servers", "BisectHosting", "FREAKHOSTING", "swhosting.com", "AHOSTING", "managedhosting.de GmbH", "Serverpars Webhosting (Pars.host)"]:
+        out.append(match(name, "org", rules) is not None)
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_keyword")
+    out.append(dm.matches_keyword(norm("webhosting servers"), [star]) == "hosting")
+    out.append(dm.matches_keyword(norm("Ghosting Media Ltd"), [star]) is None)
+    out.append(dm.matches_keyword(norm("HostingBazis Bt."), [star]) is None)
+    out.append(dm.matches_keyword(norm("Hosting Solutions"), [star]) is None)
+    out.append(dm.matches_keyword(norm("Hostingly Inc"), [star]) is None)
+    out.append(dm.matches_keyword(norm("Krystal Hosting Ltd"), [dm.parse_keyword_entry("hosting")]) == "hosting")
+    out.append(dm.matches_keyword(norm("EGIHosting"), [dm.parse_keyword_entry("hosting")]) is None)
+    out.append(dm.matches_keyword(norm("EGIHosting"), [star], field="isp") is None)
+    out.append(match("EGIHosting", "isp", rules) is None)
+    for bad in ["org: *", "org: *web hosting"]:
+        try:
+            dm.parse_keyword_entry(bad)
+            out.append(False)
+        except ValueError:
+            out.append(True)
+    out.append(len({(str(k), k.scope, k.mode) for k in rules["keywords"]}) == len(rules["keywords"]))
+    named = {
+        "RackNerd LLC": "racknerd", "NTT America, Inc.": "ntt america", "IONOS Inc.": "ionos", "Telstra Limited": "telstra", "Vodafone Deutschland GmbH": "vodafone",
+        "Fastweb SpA": "fastweb", "Uninet S.A. de C.V.": "uninet", "CLIENTE ANTEL URUGUAY": "cliente antel", "Web.com Group, Inc.": "web com",
+        "PSINet, Inc.": "psinet", "Comcast IP Services, L.L.C.": "comcast", "CloudFly Net Inc": "cloudfly",
+    }
+    for name, family in named.items():
+        out.append(dm.matches_prefix(norm(name), rules["prefixes"]) == family)
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    for real in ["NTT DATA", "NTT DOCOMO,INC.", "Ionosphere Research Lab", "Comcastic Media", "Web Commerce Partners", "Telstrand AB", "Racknerdy Co"]:
+        out.append(dm.infrastructure_reason(dict(base, org=real), rules) is None)
+    # gate (a) failed, 0 of 4 reviewed orgs read as infrastructure from the name: no Meta, Facebook or Netflix prefix is applied
+    for tenant in ["Netflix Streaming Services Inc.", "Meta Platforms Ireland Limited", "Facebook, Inc.", "Netflix Luxembourg S.a.r.l."]:
+        out.append(dm.matches_prefix(norm(tenant), rules["prefixes"]) is None)
+    return out
+
+
 def run_tests():
     """Run all matcher cases and return how many passed."""
     kw = ["hosting", "vpn", "internet service provider", "chinanet"]
@@ -179,7 +232,7 @@ def run_tests():
         matches(norm("Hosting.de GmbH"), kw) == "hosting",
     ]
     loaded = dm.load_keywords()
-    cases.append(len(loaded) == len(set(loaded)) and "vpn" in loaded and not [k for k in loaded if k == "telecom" and k.scope == "any"])
+    cases.append(len({(str(k), k.scope, k.mode) for k in loaded}) == len(loaded) and "vpn" in loaded and not [k for k in loaded if k == "telecom" and k.scope == "any"])
     cases.append(dm.matches_prefix(norm("Weebly, Inc."), dm.load_prefixes()) == "weebly")
     scoped = [dm.parse_keyword_entry("org: telecom"), dm.parse_keyword_entry("hosting")]
     cases.append(scoped[0] == "telecom" and scoped[0].scope == "org" and scoped[1].scope == "any")
@@ -217,6 +270,7 @@ def run_tests():
     cases.extend(isp_cases())
     cases.extend(d5_followup_cases())
     cases.extend(d6_cert_cases())
+    cases.extend(d6_gate_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)
