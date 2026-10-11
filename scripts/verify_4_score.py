@@ -1,4 +1,4 @@
-"""Independent recompute of 4_score from D9, D10 and D11 in plain Python (own constants, no import of the stage); compares scores, bands, caps, top_signals and why phrases."""
+"""Independent recompute of 4_score from D9, D10, D11 and D12 in plain Python (own constants, no import of the stage); compares scores, bands, caps, top_signals and why phrases."""
 import argparse
 import random
 import sys
@@ -14,6 +14,9 @@ FORBIDDEN_WORDS = ("breach", "compromised", "hacked")
 CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10 text
 OPERATOR_CLAUSE = "Name looks like a network operator."  # D10 cap clause, D11.3 also on operator-shaped review rows
 SKIP_CLAUSE = "Below the review cut-off."  # D11.3
+SKIP_CLAUSE_SIGNAL = "Ranked below this run's review list; a rank, not a judgement of risk."  # D12.2
+EXPOSED_NEW = "on software that is end-of-life or whose version matches a CVSS 7+ vulnerability"  # D12.3
+EXPOSED_OLD = "on outdated software"  # D12.3 replaced it
 KEV_PHRASE = "running software whose version matches the CISA known-exploited list"  # D11.3
 CVSS_PHRASE = "worst version-matched vulnerability scores CVSS"  # D11.3
 OLD_PHRASES = ("Exposure is limited.", "with a vulnerability on the CISA", "worst vulnerability scores", "Hosts located in", "known-exploited host", "is vulnerable")  # must not appear after D11
@@ -117,10 +120,16 @@ def check_account(sig, acc, contact_x, review_y, rank, review_n):
     why = acc["why"] or ""
     if (unc == "contact") != why.endswith(CLAUSE) or (unc != "contact" and CLAUSE in why):
         problems.append(f"D10 clause wrong for band_uncapped {unc}: {why!r}")
-    if band == "skip" and u > 0 and not why.startswith("No exposure") and SKIP_CLAUSE not in why:
-        problems.append(f"skip why lacks the D11.3 clause: {why!r}")
-    if band != "skip" and SKIP_CLAUSE in why:
+    kept = (acc["top_signals"] or "").split(",")
+    if band == "skip" and u > 0:
+        want = SKIP_CLAUSE_SIGNAL if ("kev_exposed" in kept or "max_cvss_band" in kept) else SKIP_CLAUSE  # D12.2: judged on the signals kept
+        other = SKIP_CLAUSE if want == SKIP_CLAUSE_SIGNAL else SKIP_CLAUSE_SIGNAL
+        if not why.endswith(want) or other in why:
+            problems.append(f"skip why should end with {want!r}: {why!r}")
+    if band != "skip" and (SKIP_CLAUSE in why or SKIP_CLAUSE_SIGNAL in why):
         problems.append(f"skip clause on a {band} row: {why!r}")
+    if EXPOSED_OLD in why or ("exposed_and_outdated" in kept) != (EXPOSED_NEW in why):
+        problems.append(f"D12.3 exposure phrase wrong for top_signals {kept}: {why!r}")
     if band == "review" and sig["operator_name_shape"] and OPERATOR_CLAUSE not in why:
         problems.append(f"operator-shaped review row without the operator clause: {why!r}")
     if band != "review" and OPERATOR_CLAUSE in why:
@@ -143,15 +152,20 @@ def check_account(sig, acc, contact_x, review_y, rank, review_n):
     return problems
 
 
+def order_key(s, urgency, contact, cid):
+    """Return the D12.1 sort key: contact desc, urgency desc, operator flag false first, KEV hosts desc (null as 0), host_count desc, id asc."""
+    return (-contact, -urgency, bool(s["operator_name_shape"]), -(s["kev_host_count"] or 0), -s["host_count"], cid)
+
+
 def rank_accounts(sigs):
-    """Return {company_id: 1-based rank} over non-excluded companies by contact desc, urgency desc, host_count desc, id asc, recomputed from the signals."""
+    """Return {company_id: 1-based rank} over non-excluded companies in the D12.1 order, recomputed from the signals."""
     keyed = []
     for cid, s in sigs.items():
         if s["noise_host_count"] >= 2 and s["noise_host_share"] >= 0.5:
             continue
         u = urgency_of(s)
-        keyed.append((-contact_of(u, fit_of(s)), -u, -s["host_count"], cid))
-    return {k[3]: i for i, k in enumerate(sorted(keyed), 1)}
+        keyed.append(order_key(s, u, contact_of(u, fit_of(s)), cid))
+    return {k[-1]: i for i, k in enumerate(sorted(keyed), 1)}
 
 
 def main():
@@ -182,8 +196,8 @@ def main():
             for p in check_account(sigs[acc["account_id"]], acc, args.contact, args.review, ranks.get(acc["account_id"], 10**9), args.review_n):
                 bad += 1
                 print(f"DISAGREE {acc['account_id']} {acc['company_name']}: {p}")
-    order_ok = all((accs[i]["contact_score"], accs[i]["urgency_score"], accs[i]["host_count"]) >=
-                   (accs[i + 1]["contact_score"], accs[i + 1]["urgency_score"], accs[i + 1]["host_count"]) for i in range(len(accs) - 1))
+    keys = [order_key(sigs[a["account_id"]], a["urgency_score"], a["contact_score"], a["account_id"]) for a in accs]
+    order_ok = all(keys[i] < keys[i + 1] for i in range(len(keys) - 1))  # strictly increasing: the file is in the D12.1 total order
     print(f"checked {len(picked)} companies ({'all' if args.all else f'{args.sample} random + top 25 + exclude rows'}); disagreements: {bad}; sort order ok: {order_ok}")
     return 0 if bad == 0 and order_ok else 1
 

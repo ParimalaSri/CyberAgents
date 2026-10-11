@@ -343,7 +343,7 @@ class ReviewBandTests(unittest.TestCase):
         self.assertEqual(sorted(accounts[a]["contact_score"] for a in review), [29, 33, 36])
         for a in order[3:]:
             self.assertEqual(accounts[a]["band"], "skip")
-            self.assertTrue(accounts[a]["why"].endswith("Below the review cut-off."), accounts[a]["why"])
+            self.assertTrue(accounts[a]["why"].endswith(STAGE.SKIP_CLAUSE_SIGNAL), accounts[a]["why"])  # D12.2: KEV and CVSS sentences are kept
         self.assertTrue(all(accounts[a]["band_uncapped"] in ("review", "contact") for a in order))  # band_uncapped keeps its threshold meaning
 
     def test_would_be_contacts_are_never_dropped(self):
@@ -390,6 +390,45 @@ class ReviewBandTests(unittest.TestCase):
             accounts, _, _, _ = run_scores(ids, review_n=1)
             self.assertEqual((accounts["id1"]["band"], accounts["id2"]["band"]), ("review", "skip"))
 
+    def test_tie_at_the_cut_unflagged_beats_flagged(self):
+        """D12.1: at the cut, equal score and urgency, the unflagged account wins the slot over a flagged one even with more hosts and more KEV hosts."""
+        flagged = sig("a_flagged", kev_exposed=True, kev_host_count=9, footprint_band=3, host_count=50, operator_shape_t2=True)  # fit 45 - 30 = 15
+        plain = sig("z_plain", kev_exposed=True, kev_host_count=1, footprint_band=1, host_count=2)  # fit 15
+        accounts, order, _, _ = run_scores([flagged, plain], review_n=1)
+        self.assertEqual(accounts["a_flagged"]["contact_score"], accounts["z_plain"]["contact_score"])
+        self.assertEqual(accounts["a_flagged"]["urgency_score"], accounts["z_plain"]["urgency_score"])
+        self.assertEqual((accounts["z_plain"]["band"], accounts["a_flagged"]["band"]), ("review", "skip"))
+        self.assertEqual(order, ["z_plain", "a_flagged"])
+        self.assertTrue(accounts["a_flagged"]["why"].endswith(STAGE.SKIP_CLAUSE_SIGNAL))
+
+    def test_tie_order_kev_hosts_then_host_count_then_id(self):
+        """D12.1: with score, urgency and flag equal the order is kev_host_count desc, then host_count desc, then account_id asc; null KEV counts as 0."""
+        base = dict(kev_exposed=True, footprint_band=1)
+        rows = [sig("k0", kev_host_count=1, host_count=9, **base), sig("k3", kev_host_count=3, host_count=2, **base),
+                sig("h8", kev_host_count=2, host_count=8, **base), sig("h4b", kev_host_count=2, host_count=4, **base),
+                sig("h4a", kev_host_count=2, host_count=4, **base)]
+        accounts, order, _, _ = run_scores(rows, review_n=2)
+        self.assertEqual(len({r["contact_score"] for r in accounts.values()}), 1)
+        self.assertEqual(order, ["k3", "h8", "h4a", "h4b", "k0"])
+        self.assertEqual([accounts[a]["band"] for a in order], ["review", "review", "skip", "skip", "skip"])
+        _, order, _, _ = run_scores([sig("o", kev_host_count=0, **base), sig("n", kev_host_count=None, **base)], review_n=1)
+        self.assertEqual(order, ["n", "o"])  # null counts as 0, so the id decides
+
+    def test_stage_order_sql_text(self):
+        """D12.1: the shared order list is exactly score, urgency, flag asc, coalesce KEV, host_count, id."""
+        self.assertEqual(STAGE.stage_order_sql("account_id"),
+                         "contact_score DESC, urgency_score DESC, operator_name_shape ASC, coalesce(kev_host_count, 0) DESC, host_count DESC, account_id ASC")
+
+    def test_top_accounts_report_uses_the_new_order(self):
+        """D12.1: the top-accounts report lists a tie in the stage order (unflagged before flagged)."""
+        flagged = sig("a_flagged", company_name="Flagged Co", kev_exposed=True, kev_host_count=9, footprint_band=3, host_count=50, operator_shape_t2=True)
+        plain = sig("z_plain", company_name="Plain Co", kev_exposed=True, kev_host_count=1, footprint_band=1, host_count=2)
+        run_scores([flagged, plain], review_n=1)
+        rep = STAGE.Report()
+        STAGE.section_top(LAST_CON[0], rep, 2)
+        text = "\n".join(rep.lines)
+        self.assertLess(text.index("Plain Co"), text.index("Flagged Co"))
+
     def test_excluded_accounts_never_take_a_slot(self):
         """An excluded account is not ranked: with N = 1 the single review slot goes to the best non-excluded account."""
         rows = [sig("ex", noise_host_count=3, noise_host_share=0.6, host_count=2, **self.strong(footprint_band=3)), sig("ok", max_cvss_band=3), sig("ok2", max_cvss_band=3, host_count=9)]
@@ -413,6 +452,8 @@ class ReviewBandTests(unittest.TestCase):
         STAGE.section_cut(LAST_CON[0], rep, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 3)
         text = "\n".join(rep.lines)
         self.assertIn("contact_score 29: 4 non-excluded accounts are tied at 29, 2 are kept in review and 2 go to skip", text)
+        self.assertIn("tie broken by urgency_score, operator_name_shape (false first), kev_host_count, host_count, account_id", text)
+        self.assertIn("Kept at the cut: Acme (unflagged, 5 hosts, 0 KEV hosts)", text)
         rep = STAGE.Report()
         STAGE.section_cut(LAST_CON[0], rep, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 1)
         self.assertIn("the band is the would-be contacts only", "\n".join(rep.lines))
@@ -430,7 +471,7 @@ class WhyTests(unittest.TestCase):
             (dict(max_cvss_band=2, max_cvss=7.5), "Worst version-matched vulnerability scores CVSS 7.5."),
             (dict(max_cvss_band=1, max_cvss=4.3), "Worst version-matched vulnerability scores CVSS 4.3."),
             (dict(risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, risky_ports=[22, 3389, 3306]),
-             "An exposed admin or database service (SSH 22, RDP 3389) on outdated software."),
+             "An exposed admin or database service (SSH 22, RDP 3389) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability."),
             (dict(risky_service_exposed=True, risky_non_ssh_exposed=True, risky_ports=[22, 3389]), "Remote-admin or database services exposed (RDP 3389)."),
             (dict(risky_service_exposed=True, risky_ports=[22]), "SSH (port 22) open to the internet."),
             (dict(eol_stack=True, eol_host_count=2), "2 hosts on end-of-life software."),
@@ -467,8 +508,10 @@ class WhyTests(unittest.TestCase):
         self.assertEqual(score_one()["why"], "No exposure signal found in the scan (5 hosts seen).")
         self.assertEqual(score_one(host_count=1)["why"], "No exposure signal found in the scan (1 host seen).")
         self.assertEqual(STAGE.SKIP_CLAUSE, "Below the review cut-off.")
+        self.assertEqual(STAGE.SKIP_CLAUSE_SIGNAL, "Ranked below this run's review list; a rank, not a judgement of risk.")
         skip = score_one(max_cvss_band=1, max_cvss=3.0)
-        self.assertEqual((skip["band"], skip["why"]), ("skip", "Worst version-matched vulnerability scores CVSS 3.0. Below the review cut-off."))
+        self.assertEqual((skip["band"], skip["why"]),
+                         ("skip", "Worst version-matched vulnerability scores CVSS 3.0. Ranked below this run's review list; a rank, not a judgement of risk."))  # D12.2: a CVSS skip row
         self.assertNotIn("Exposure is limited", skip["why"])
         self.assertNotIn("Below the review cut-off.", score_one(max_cvss_band=3, max_cvss=9.8)["why"])  # a review row
         self.assertEqual(score_one(noise_host_count=3, noise_host_share=0.6, host_count=2)["why"],
@@ -484,16 +527,60 @@ class WhyTests(unittest.TestCase):
         skip_op = score_one(max_cvss_band=1, max_cvss=3.0, operator_shape_t1=True)
         self.assertEqual(skip_op["band"], "skip")
         self.assertNotIn("network operator", skip_op["why"])
-        self.assertEqual(skip_op["why"], "Worst version-matched vulnerability scores CVSS 3.0. Below the review cut-off.")
+        self.assertEqual(skip_op["why"], "Worst version-matched vulnerability scores CVSS 3.0. Ranked below this run's review list; a rank, not a judgement of risk.")
         accounts, _, _, _ = run_scores([sig("o", max_cvss_band=3, max_cvss=9.8, operator_shape_t2=True)], review_n=0)
         self.assertEqual(accounts["o"]["band"], "skip")  # N = 0 and not a would-be contact: skip, so no operator clause
-        self.assertTrue(accounts["o"]["why"].endswith("Below the review cut-off."))
+        self.assertTrue(accounts["o"]["why"].endswith(STAGE.SKIP_CLAUSE_SIGNAL))  # D12.2: the CVSS sentence is kept
+
+    def test_skip_clause_d12_by_kept_signal(self):
+        """D12.2: a skip row with a kept KEV or CVSS sentence ends with the signal clause; any other skip row keeps the plain clause."""
+        accounts, _, _, _ = run_scores([sig("k", kev_exposed=True, kev_host_count=2), sig("v", max_cvss_band=1, max_cvss=3.0), sig("e", eol_stack=True, eol_host_count=2),
+                                        sig("f", footprint_band=1, distinct_host_ips=5, risky_service_exposed=True, risky_ports=[22])], review_n=0)
+        self.assertEqual(accounts["k"]["band"], "skip")
+        self.assertEqual(accounts["k"]["why"], "2 hosts running software whose version matches the CISA known-exploited list. " + STAGE.SKIP_CLAUSE_SIGNAL)  # a KEV skip row
+        self.assertEqual(accounts["v"]["why"], "Worst version-matched vulnerability scores CVSS 3.0. " + STAGE.SKIP_CLAUSE_SIGNAL)  # a CVSS skip row
+        self.assertEqual(accounts["e"]["why"], "2 hosts on end-of-life software. Below the review cut-off.")  # no KEV or CVSS sentence: the old clause
+        self.assertEqual(accounts["f"]["why"], "5 IPs in the footprint; SSH (port 22) open to the internet. Below the review cut-off.")
+        for cid in ("k", "v"):
+            self.assertNotIn(STAGE.SKIP_CLAUSE, accounts[cid]["why"])
+        self.assertNotIn(STAGE.SKIP_CLAUSE_SIGNAL, accounts["e"]["why"] + accounts["f"]["why"])
+        self.assertEqual(len(STAGE.SKIP_CLAUSE_SIGNAL.split()), 13)
+
+    def test_skip_clause_follows_the_kept_signals(self):
+        """D12.2: the clause is judged on the signals kept: a skip row whose kept signal is not KEV or CVSS gets the plain clause."""
+        row = dict(band="skip", noise_host_count=0, host_count=5, cap_reasons=None, operator_name_shape=False, urgency_score=40, p_vuln=40, vuln_signal="max_cvss_band",
+                   max_cvss=9.8, p_expo=0, expo_signal=None, p_eol=0, p_cert=0, p_legacy=0, p_footprint=0, p_territory=0, p_sensitive=0, risky_ports=[],
+                   kev_host_count=0, eol_host_count=0, cert_issue_host_count=0, legacy_tls_host_count=0, distinct_host_ips=1, country_code="DE")
+        top, why = STAGE.build_why(row)
+        self.assertEqual((top, why.endswith(STAGE.SKIP_CLAUSE_SIGNAL)), ("max_cvss_band", True))
+        row.update(p_vuln=0, vuln_signal=None, p_eol=10, eol_host_count=1)
+        top, why = STAGE.build_why(row)
+        self.assertEqual((top, why.endswith(STAGE.SKIP_CLAUSE), STAGE.SKIP_CLAUSE_SIGNAL in why), ("eol_stack", True, False))
+
+    def test_exposure_phrase_d12(self):
+        """D12.3: one phrase for exposed_and_outdated, no branch, and the old words never appear."""
+        self.assertEqual(STAGE.EXPOSED_OUTDATED_TEXT, "on software that is end-of-life or whose version matches a CVSS 7+ vulnerability")
+        for over in (dict(eol_stack=True, eol_host_count=1), dict(max_cvss_band=2, max_cvss=7.5), dict()):
+            why = score_one(risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, risky_ports=[3306], **over)["why"]
+            self.assertIn("An exposed admin or database service (MySQL 3306) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability", why)
+            self.assertNotIn("on outdated software", why)
+            self.assertLessEqual(len(why.split()), 40)
+
+    def test_exposure_phrase_with_kev_falls_back_to_one_signal(self):
+        """D12.3: when KEV, the longer exposure phrase and the D10 clause exceed 40 words, the one-signal fallback keeps the top signal and the why stays within 40 words."""
+        a = score_one(kev_exposed=True, kev_host_count=3, risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, risky_ports=[3389, 3306],
+                      eol_stack=True, eol_host_count=1)
+        self.assertEqual((a["band_uncapped"], a["top_signals"]), ("contact", "kev_exposed"))
+        self.assertLessEqual(len(a["why"].split()), 40)
+        self.assertNotIn("end-of-life or whose", a["why"])
 
     def test_top_two_by_points_with_tie_order(self):
         """Top two signals by points; ties go vulnerability, exposure, hygiene, fit; top_signals lists exactly the signals used."""
         a = score_one(kev_exposed=True, kev_host_count=1, exposed_and_outdated=True, risky_service_exposed=True, risky_non_ssh_exposed=True,
                       risky_ports=[3389], eol_stack=True, eol_host_count=1)
-        self.assertEqual(a["top_signals"], "kev_exposed,exposed_and_outdated")
+        self.assertEqual(a["top_signals"], "kev_exposed")  # D12.3: the longer exposure phrase no longer fits beside KEV and the D10 clause in 40 words, so the one-signal fallback applies
+        a = score_one(exposed_and_outdated=True, risky_service_exposed=True, risky_non_ssh_exposed=True, risky_ports=[3389], eol_stack=True, eol_host_count=1)
+        self.assertEqual(a["top_signals"], "exposed_and_outdated,eol_stack")
         a = score_one(cert_expired_or_soon=True, cert_issue_host_count=1, legacy_tls=True, legacy_tls_host_count=1, eol_stack=True, eol_host_count=1)
         self.assertEqual(a["top_signals"], "eol_stack,cert_expired_or_soon")
         a = score_one(max_cvss_band=1, max_cvss=3.0, footprint_band=1, distinct_host_ips=3)  # CVSS 10 vs footprint 15

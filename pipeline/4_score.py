@@ -53,6 +53,10 @@ CAP_UNVERIFIED = "operator_unverified"  # D10: every would-be contact is held in
 UNVERIFIED_CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10 text, appended last for every would-be contact
 OPERATOR_CLAUSE = "Name looks like a network operator."  # D10 cap clause; D11.3 also puts it on any other review row with operator_name_shape
 SKIP_CLAUSE = "Below the review cut-off."  # D11.3: replaces "Exposure is limited."; a statement about the score and the cut, not a risk judgement
+SKIP_CLAUSE_SIGNAL = "Ranked below this run's review list; a rank, not a judgement of risk."  # D12.2: skip rows whose kept top signals include kev_exposed or max_cvss_band
+SKIP_SIGNAL_NAMES = ("kev_exposed", "max_cvss_band")  # D12.2: the signals whose sentence makes the plain skip clause read as a dismissal
+EXPOSED_OUTDATED_TEXT = "on software that is end-of-life or whose version matches a CVSS 7+ vulnerability"  # D12.3: true for both ways the signal fires (EOL tag or version-matched CVSS 7+)
+STAGE_ORDER_TEXT = "urgency_score, operator_name_shape (false first), kev_host_count, host_count, account_id"  # D12.1 tie description printed at the cut
 KEV_PHRASE = "running software whose version matches the CISA known-exploited list"  # D11.3 (RAW-006): the CVE is inferred from a banner version, never stated as fact
 CVSS_PHRASE = "worst version-matched vulnerability scores CVSS"  # D11.3 (RAW-006)
 CAP_CLAUSES = (  # priority order for the single cap clause in the why
@@ -69,7 +73,9 @@ BANDS = ("contact", "review", "skip", "exclude")
 D11_EXPECTED = {"contact": "0", "review": "200 (N), or the would-be contacts if more", "skip": "5,589 (the rest)", "exclude": "1"}  # senior's D11 expectation at N = 200 on the sample
 PREVIOUS_RUN = {"contact": 0, "review": 664, "skip": 5125, "exclude": 1}  # the D10 run (threshold-only review at Y = 20, territory 35, T2 with the net branch), 40 / 20
 D11_EXPECTED_WOULD_BE = 51  # D11.5: about 51 would-be contacts after territory 0 (ablation); the stage prints the measured count
-D11_EXPECTED_TIE = (34, 22)  # D11.2: cut score and tie size measured by the senior before the territory change
+D11_EXPECTED_TIE = (30, 142)  # D12.1: cut score and tie size measured by the senior on the D11 output (7 kept, 135 to skip)
+D12_EXPECTED_KEPT = "Alta Gracia Project Holding, Provider Ktechnology, Brainoza OU, SugarHosts, Seiko Electric, Free Way Tecnologia, Owl Limited (0 flagged, 5 singletons)"  # D12.1 simulation of the 7 kept
+D12_EXPECTED_SKIP_SIGNAL = 537  # D12.2: 303 KEV + 234 CVSS skip rows
 COMPARE_PAIRS = ((45, 25), (40, 20), (35, 15))
 TOP_N = 25
 HISTOGRAM_BUCKETS = 10
@@ -82,6 +88,12 @@ OUTPUT_COLUMNS = (
 )
 KEY_COLUMNS = tuple(name for name, _ in OUTPUT_COLUMNS)
 POINT_COLUMNS = ("p_vuln", "p_expo", "p_eol", "p_cert", "p_legacy", "p_footprint", "p_territory", "p_sensitive")
+
+
+def stage_order_sql(id_col="account_id", score="contact_score", scored="", flags=""):
+    """Return the D12.1 total-order ORDER BY list: score DESC, urgency DESC, operator_name_shape ASC, coalesce(kev_host_count, 0) DESC, host_count DESC, id ASC; scored and flags are column prefixes."""
+    return (f"{score} DESC, {scored}urgency_score DESC, {flags}operator_name_shape ASC, coalesce({flags}kev_host_count, 0) DESC, "
+            f"{scored}host_count DESC, {id_col} ASC")
 
 
 def quote_path(path):
@@ -168,12 +180,12 @@ def build_scored(con, input_path, contact, review, review_n=REVIEW_N):
         FROM scored
         """
     )
-    # D11.2: rank over non-excluded accounts in the D9.6 item 8 total order (account_id is unique, so the order is total); excluded accounts get a null rank.
+    # D11.2, D12.1: rank over non-excluded accounts in the STAGE_ORDER total order (account_id is unique, so the order is total); excluded accounts get a null rank.
     con.execute(
         f"""
         CREATE OR REPLACE TABLE scored AS
         SELECT s.*, r.review_rank FROM scored s LEFT JOIN (
-            SELECT company_id, (row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC, host_count DESC, company_id))::INTEGER AS review_rank
+            SELECT company_id, (row_number() OVER (ORDER BY {stage_order_sql('company_id')}))::INTEGER AS review_rank
             FROM scored WHERE NOT (noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})) r USING (company_id)
         """
     )
@@ -204,7 +216,7 @@ def signal_candidates(row):
     if row["p_expo"] > 0:
         sig = row["expo_signal"]
         if sig == "exposed_and_outdated":
-            phrase = f"an exposed admin or database service ({port_text(ports)}) on outdated software"
+            phrase = f"an exposed admin or database service ({port_text(ports)}) {EXPOSED_OUTDATED_TEXT}"
         elif sig == "risky_non_ssh_exposed":
             phrase = f"remote-admin or database services exposed ({port_text(ports, skip_ssh=True)})"
         else:
@@ -236,10 +248,12 @@ def build_why(row):
         return None, " ".join(x for x in (f"No exposure signal found in the scan ({plural_hosts(row['host_count'])} seen).", clause) if x)  # never a would-be contact
     ranked = sorted(signal_candidates(row), key=lambda c: (-c[0], c[1], c[2]))
     unverified = UNVERIFIED_CLAUSE if CAP_UNVERIFIED in (row["cap_reasons"] or "").split(",") else ""
-    tail = clause or (SKIP_CLAUSE if row["band"] == "skip" else "")
     for keep in (2, 1):
         top = ranked[:keep]
         body = "; ".join(c[4] for c in top)
+        tail = clause
+        if not tail and row["band"] == "skip":  # D12.2: judged on the signals actually kept
+            tail = SKIP_CLAUSE_SIGNAL if any(c[3] in SKIP_SIGNAL_NAMES for c in top) else SKIP_CLAUSE
         why = " ".join(x for x in (body[0].upper() + body[1:] + ".", tail, unverified) if x)
         if len(why.split()) <= WHY_MAX_WORDS:
             return ",".join(c[3] for c in top), why
@@ -259,7 +273,7 @@ def build_accounts(con):
     if why_rows:
         con.executemany("INSERT INTO why_tbl VALUES (?, ?, ?)", why_rows)
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE TABLE accounts AS
         SELECT s.company_id::VARCHAR AS account_id, s.company_name::VARCHAR AS company_name, s.country_code::VARCHAR AS country_code,
             s.host_count::INTEGER AS host_count, s.identity_source::VARCHAR AS identity_source, s.identity_confidence::VARCHAR AS identity_confidence,
@@ -268,7 +282,7 @@ def build_accounts(con):
             s.band::VARCHAR AS band, w.why::VARCHAR AS why, NULL::VARCHAR AS decision, NULL::VARCHAR AS prompt_version,
             s.band::VARCHAR AS final_band
         FROM scored s JOIN why_tbl w USING (company_id)
-        ORDER BY contact_score DESC, urgency_score DESC, host_count DESC, account_id
+        ORDER BY {stage_order_sql('account_id')}
         """
     )
     n_sig = con.execute("SELECT count(*) FROM signals").fetchone()[0]
@@ -408,8 +422,10 @@ def section_cut(con, rep, contact, review, review_n):
     score = cut[0]
     tied, kept = con.execute(f"SELECT count(*), count(*) FILTER (WHERE review_rank <= {review_n}) FROM scored WHERE contact_score = {score} AND review_rank IS NOT NULL").fetchone()
     rep.add(f"The cut falls at contact_score {score}: {tied:,} non-excluded accounts are tied at {score}, {kept:,} are kept in review and {tied - kept:,} go to skip "
-            f"(tie broken by urgency_score, host_count, account_id; D11 measured score {D11_EXPECTED_TIE[0]} with a tie of {D11_EXPECTED_TIE[1]} before the territory change). "
+            f"(tie broken by {STAGE_ORDER_TEXT}; D12.1 measured score {D11_EXPECTED_TIE[0]} with a tie of {D11_EXPECTED_TIE[1]} on the D11 output). "
             f"Accounts above the cut score: {review_n - kept:,}.")
+    names = con.execute(f"SELECT company_name, operator_name_shape, is_singleton, coalesce(kev_host_count, 0), host_count FROM scored WHERE contact_score = {score} AND review_rank <= {review_n} ORDER BY review_rank").fetchall()
+    rep.add("Kept at the cut: " + "; ".join(f"{n} ({'flagged' if f else 'unflagged'}, {'singleton' if s else f'{h} hosts'}, {k} KEV hosts)" for n, f, s, k, h in names) + f". D12.1 simulation: {D12_EXPECTED_KEPT}.")
 
 
 def section_skip_exposure(con, rep, review=THRESHOLD_REVIEW):
@@ -418,9 +434,18 @@ def section_skip_exposure(con, rep, review=THRESHOLD_REVIEW):
         "SELECT a.contact_score < ?, count(*), count(*) FILTER (WHERE s.risky_non_ssh_exposed), count(*) FILTER (WHERE s.max_cvss_band >= 2), "
         "count(*) FILTER (WHERE s.risky_non_ssh_exposed AND s.max_cvss_band >= 2), count(*) FILTER (WHERE s.risky_non_ssh_exposed OR s.max_cvss_band >= 2) "
         "FROM accounts a JOIN scored s ON s.company_id = a.account_id WHERE a.band = 'skip' AND a.urgency_score > 0 GROUP BY 1 ORDER BY 1 DESC", [review]).fetchall()
-    rep.add(f"\nSkip accounts with urgency_score above 0, split at the floor Y = {review} (all read \"{SKIP_CLAUSE}\" and none is routed to review, D11.3):\n")
+    rep.add(f"\nSkip accounts with urgency_score above 0, split at the floor Y = {review} (none is routed to review, D11.3; the clause is \"{SKIP_CLAUSE}\", or \"{SKIP_CLAUSE_SIGNAL}\" where a KEV or CVSS sentence is kept, D12.2):\n")
     rep.table(("where", "skip accounts urgency > 0", "non-SSH admin or database port", "CVSS 7.0 or more", "both", "union"),
               [(f"contact_score below {review} (D11.3 measured 659, 42, 32, 0, 74)" if below else f"contact_score {review} or more, beyond the top-N cut", *r[1:]) for r in rows for below in [r[0]]])
+    sig_rows = con.execute("SELECT count(*), count(*) FILTER (WHERE contains(top_signals, 'kev_exposed')), count(*) FILTER (WHERE contains(top_signals, 'max_cvss_band')), "
+                           "count(*) FILTER (WHERE contact_score >= ?), count(*) FILTER (WHERE contact_score < ?) FROM accounts WHERE band = 'skip' AND why LIKE ?",
+                           [review, review, "%" + SKIP_CLAUSE_SIGNAL]).fetchone()
+    plain = con.execute("SELECT count(*) FROM accounts WHERE band = 'skip' AND why LIKE ?", ["%" + SKIP_CLAUSE]).fetchone()[0]
+    rep.add(f"\nSkip rows ending with the D12.2 clause: {sig_rows[0]:,} (KEV {sig_rows[1]:,}, CVSS {sig_rows[2]:,}; at or above the floor {sig_rows[3]:,}, below {sig_rows[4]:,}); D12 expected {D12_EXPECTED_SKIP_SIGNAL} = 303 + 234, 455 and 82. "
+            f"Skip rows with the plain clause: {plain:,}.")
+    exp = con.execute("SELECT count(*) FROM accounts WHERE why LIKE ?", ["%" + EXPOSED_OUTDATED_TEXT + "%"]).fetchone()[0]
+    longest = con.execute("SELECT max(len(string_split(why, ' '))) FILTER (WHERE band = 'skip'), max(len(string_split(why, ' '))) FROM accounts").fetchone()
+    rep.add(f"Accounts whose why carries the D12.3 exposure phrase: {exp:,} (D12 expected 45). Longest why in words: skip {longest[0]}, all rows {longest[1]} (limit {WHY_MAX_WORDS}).")
 
 
 def section_union_effect(con, rep, n):
@@ -429,10 +454,10 @@ def section_union_effect(con, rep, n):
     base = "p_territory + p_footprint + p_sensitive"
     t1_fit = f"greatest(0, least(100, {base} - CASE WHEN operator_shape_t1 THEN {PENALTY_OPERATOR} ELSE 0 END))"
     alt = contact_expr_sql("t1_fit")
-    con.execute(f"CREATE OR REPLACE TABLE rank_cmp AS SELECT company_id, fit_score, contact_score, urgency_score, host_count, {t1_fit} AS t1_fit FROM scored")
+    con.execute(f"CREATE OR REPLACE TABLE rank_cmp AS SELECT company_id, fit_score, contact_score, urgency_score, host_count, operator_name_shape, kev_host_count, {t1_fit} AS t1_fit FROM scored")
     con.execute(f"CREATE OR REPLACE TABLE rank_cmp AS SELECT *, ({alt})::INTEGER AS t1_contact FROM rank_cmp")
-    con.execute("CREATE OR REPLACE TABLE rank_cmp AS SELECT *, row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC, host_count DESC, company_id) AS rank_new, "
-                "row_number() OVER (ORDER BY t1_contact DESC, urgency_score DESC, host_count DESC, company_id) AS rank_old FROM rank_cmp")
+    con.execute(f"CREATE OR REPLACE TABLE rank_cmp AS SELECT *, row_number() OVER (ORDER BY {stage_order_sql('company_id')}) AS rank_new, "
+                f"row_number() OVER (ORDER BY {stage_order_sql('company_id', 't1_contact')}) AS rank_old FROM rank_cmp")
     changed, lost, avg_loss, cchanged, max_loss = con.execute(
         "SELECT count(*) FILTER (WHERE fit_score <> t1_fit), sum(t1_fit - fit_score), avg(t1_fit - fit_score) FILTER (WHERE fit_score <> t1_fit), "
         "count(*) FILTER (WHERE contact_score <> t1_contact), max(t1_fit - fit_score) FROM rank_cmp").fetchone()
@@ -451,7 +476,7 @@ def section_top(con, rep, n):
     rows = con.execute(
         f"SELECT a.company_name, a.country_code, a.host_count, a.fit_score, a.urgency_score, a.contact_score, a.band, coalesce(a.cap_reasons, ''), "
         f"s.operator_shape_t1, s.operator_shape_t2, a.why FROM accounts a JOIN scored s ON s.company_id = a.account_id "
-        f"ORDER BY a.contact_score DESC, a.urgency_score DESC, a.host_count DESC, a.account_id LIMIT {n}").fetchall()
+        f"ORDER BY {stage_order_sql('a.account_id', 'a.contact_score', 'a.', 's.')} LIMIT {n}").fetchall()
     rep.table(("company", "cc", "hosts", "fit", "urgency", "contact", "band", "cap_reasons", "T1", "T2", "why"), rows)
     flagged = sum(1 for r in rows if r[8] or r[9])
     t1 = sum(1 for r in rows if r[8])
