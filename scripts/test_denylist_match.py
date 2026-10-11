@@ -206,9 +206,21 @@ def d6_gate_cases():
         out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
     for real in ["NTT DATA", "NTT DOCOMO,INC.", "Ionosphere Research Lab", "Comcastic Media", "Web Commerce Partners", "Telstrand AB", "Racknerdy Co"]:
         out.append(dm.infrastructure_reason(dict(base, org=real), rules) is None)
-    # gate (a) failed, 0 of 4 reviewed orgs read as infrastructure from the name: no Meta, Facebook or Netflix prefix is applied
-    for tenant in ["Netflix Streaming Services Inc.", "Meta Platforms Ireland Limited", "Facebook, Inc.", "Netflix Luxembourg S.a.r.l."]:
-        out.append(dm.matches_prefix(norm(tenant), rules["prefixes"]) is None)
+    # gate (a) was superseded by D7.1: see d7_cache_operator_cases
+    return out
+
+
+def d7_cache_operator_cases():
+    """Return assertions for the D7.1 cache-operator prefixes: four named orgs match, Apple does not, and any org starting with those words also matches."""
+    rules = dm.load_rules()
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = []
+    for name in ["Netflix Streaming Services Inc.", "Netflix Luxembourg S.a.r.l.", "Meta Platforms Ireland Limited", "Facebook, Inc."]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    out.append(dm.infrastructure_reason(dict(base, org="Apple Inc."), rules) is None)
+    for name in ["Netflix Studios LLC", "Facebook Payments Ltd", "Meta Platforms Technologies"]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    out.append(dm.infrastructure_reason(dict(base, org="Metaverse Labs"), rules) is None)
     return out
 
 
@@ -271,6 +283,7 @@ def run_tests():
     cases.extend(d5_followup_cases())
     cases.extend(d6_cert_cases())
     cases.extend(d6_gate_cases())
+    cases.extend(d7_cache_operator_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)

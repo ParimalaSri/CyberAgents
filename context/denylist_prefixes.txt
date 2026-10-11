@@ -76,3 +76,8 @@ web com
 psinet
 comcast
 cloudfly
+
+# --- content-delivery / cache-node operators, D2/D7 (D7.1): closed list of content-delivery operators, excluded on hostname evidence (not the name-only gate): Netflix 143/143 rows on nflxvideo.net, Meta and Facebook 27/27 on facebook.com or fbcdn.net. Apple Inc. is deliberately NOT excluded. ---
+netflix
+meta platforms
+facebook

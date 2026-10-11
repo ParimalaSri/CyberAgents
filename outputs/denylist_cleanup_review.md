@@ -176,7 +176,7 @@ Not added (outside the list): the China Telecom subsidiary name for Tianyi Digit
 ### 8.2 Gates
 | rule | newly matched | reviewed | INFRA | result | decision |
 |---|---|---|---|---|---|
-| (a) prefixes `facebook`, `meta platforms`, `netflix` | 176 rows, 4 orgs | 4 | 0/4 (0%) | FAILED | NOT added |
+| (a) prefixes `facebook`, `meta platforms`, `netflix` | 176 rows, 4 orgs | 4 | 0/4 (0%) | FAILED on names; superseded by D7.1 | ADDED under D7.1 (hostname evidence, 2026-10-11) |
 | (b) `org: unicom` | 249 rows, 47 orgs | 47 | 46/47 (97.9%) | PASSED | added |
 | (b) `org: province network` | 204 rows, 38 orgs | 38 | 38/38 (100%) | PASSED | added (1 row beyond unicom: CNCGROUP Zhejiang Province Network) |
 | (c) compound `org: *hosting` | 95 rows, 30 orgs | 30 | 30/30 (100%) | PASSED | added |
@@ -188,6 +188,12 @@ read as infrastructure and the 90% gate fails. Supplementary evidence that is NO
 `edge-*.facebook.com` or `fbcdn.net` names, 3 of them noise rows (RAT banner artefacts). So the rows look like cache or edge nodes of the organisation itself, the reading in D6.4, but the name-only
 gate as defined cannot show it. A hostname-domain rule (`nflxvideo.net`, `fbcdn.net`) would be a new rule type and was not built. The cert O side is guarded (8.1); the org side stays open for the
 senior to rule on, and the 176 rows still survive as companies (Netflix Streaming Services is the 7th largest surviving org).
+(a) Superseded by D7.1 (senior-data-engineer decision, 2026-10-11): the three prefixes `netflix`, `meta platforms`, `facebook` are now in `context/denylist_prefixes.txt` as a closed list of
+content-delivery operators, excluded on hostname evidence rather than the name-only gate: Netflix 143/143 rows on `nflxvideo.net` (Open Connect cache nodes), Meta Platforms Ireland and Facebook
+27/27 rows on facebook.com or fbcdn.net edge names. `Apple Inc.` is deliberately NOT excluded. The prefixes also match any future org that starts with those words (pinned in tests).
+Re-measure on `data/silver/hosts.parquet` (97,758 rows, matcher only, stage not rerun): 173 rows change status (170 `org` rows plus 3 noise rows; Netflix Streaming Services 141, Netflix Luxembourg 2,
+Meta Platforms Ireland 20, Facebook 10); matcher-infrastructure 84,523 to 84,696 rows (86.46% to 86.64%).
+
 (b) The one UNSURE is `Unicom (Jiangsu) Industry Internet Co. LTD` (4 rows, counted REAL). The other 46 are China Unicom provincial or city networks, `CHINA UNICOM CLOUD DATA COMPANY LIMITED`,
 `China UNICOM, Beijing Branch` and fujian provincial network of UNICOM entries. Whole word: `Unicomer Group` is not matched. `province network` and `unicom` are carrier words; no non-carrier name
 containing them is in this sample, which says nothing about the full file.

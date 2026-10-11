@@ -147,6 +147,10 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
   but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr added (see the denylist-cleanup update). (4) The checker now enforces the shared rules (RAW-010 closed); `2_companies` is not built yet. (5) Not yet run on the full file.
 - Contract rule: companies row share outside 5-20% flagged (already planned); keyword-leakage check once `check_contract.py` calls `matches_keyword`.
+- Update 2026-10-11, D7 step 1 (branch `feat/data-integrator/d7-prefixes`, proposed; decided by senior-data-engineer): `netflix`, `meta platforms`, `facebook` added as D2/D7.1 cache-operator
+  prefixes (gate (a) in `outputs/denylist_cleanup_review.md` 8.2 superseded by D7.1; hostname evidence Netflix 143/143 on nflxvideo.net, Meta and Facebook 27/27 on facebook.com or fbcdn.net;
+  Apple Inc. not excluded). Matcher on `data/silver/hosts.parquet` (97,758 rows): 173 rows change status, infrastructure 84,523 to 84,696 (86.46% to 86.64%). Not added: True Internet, Taiwan Fixed
+  Network, Leaseweb and the other residual names (accepted long tail, D7.2). 212 tests pass.
 
 ## RAW-014 Expectations in D3/section 10 not reproduced on the spread sample
 - Symptom: port 12304 is 0.22% (expected about 2%); infrastructure share 87.63% (expected about 86%); surviving 12.34% (expected about 10%).
@@ -201,6 +205,8 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Fix: owner decision on new rules through the existing 90% gate; stage code unchanged. A real fix is data-integrator work.
 - Contract rule: none can catch an unlisted name. Mitigation in the contract: the resolved share of `identity_source` must stay inside 5% to 20% (measured 14.73%), and the
   denylist rule above fails as soon as a rule for these names is added to `context/denylist*.txt` and the stage is not rerun.
+- Update 2026-10-11, D7 step 1 (branch `feat/data-integrator/d7-prefixes`, proposed; decided by senior-data-engineer): DQ-002 residual accepted under D7.2. The residual metric is now
+  judged on the full run by the top 50 orgs by final `contact_score`; reopen if more than 5 of the 50 read as operators. Status: ACCEPTED (D7.2).
 
 ## DQ-003 Removed duplicate rows are re-scans, not copies (extends PIPE-002)
 - Symptom: the stage report says "2,242 duplicate rows removed". Recomputed from the raw sample: 100,000 rows, 97,758 distinct keys, 1,098 key groups covering 3,340 rows;
