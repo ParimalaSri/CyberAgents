@@ -11,7 +11,7 @@ section 15, or labelled **assumption**, **estimate** or **to be calibrated**. No
 
 Contents: 1 Overview | 2 Layers | 3 Signals and scoring | 4 Rule vs LLM | 5 LLM layer | 6 Evals | 7 Cost model |
 8 Serving | 9 Environments and governance | 10 Sampling | 11 Trade-offs and weaknesses | 12 Traceability |
-13 Roadmap | 14 What the owner must supply | 15 Data decisions D1-D7 (D1-D4 proposed; D5, D6, D7 decided under delegation)
+13 Roadmap | 14 What the owner must supply | 15 Data decisions D1-D8 (D1-D4 proposed; D5 to D8 decided under delegation; D8 = companies layer spec)
 
 ---
 
@@ -131,15 +131,15 @@ has locally. Findings are about that snapshot; nothing here claims they hold for
 
 | item | spec |
 |---|---|
-| Purpose | Entity resolution: group hosts into companies. Precision over recall. |
-| Input | `hosts.parquet` and the approved denylist (`context/denylist.txt`, D1/D2 changes applied). |
+| Purpose | Entity resolution: group hosts into companies. Precision over recall. Full specification: D8 (section 15). |
+| Input | `data/silver/hosts.parquet` only. The identity decision (D4, D6, D7) is already made per row in stage 1 (`identity_source`, `name_norm`); stage 2 does not re-read the denylist or re-classify rows. |
 | Output | `data/silver/companies.parquet` |
-| Grain / key | One row per company; `company_id` = stable hash of the normalised name, whichever source produced it (so `Fiserv` from `org` and from a cert merge). |
-| Transformations | D4 precedence, first match wins: `noise` -> `org` (non-infrastructure) -> `cert_o` (not a default or vendor value) -> `infrastructure_unresolved` -> `null_org`. Hostnames and domains attached as evidence only (v1). |
-| Key columns | `company_id, company_name, name_norm, identity_source, host_count, distinct_host_ips, country_codes, evidence_domains, cert_o`. |
-| Contract | `context/contracts/companies.yml` |
+| Grain / key | One row per company; `company_id` = first 16 hex characters of `sha256(name_norm)` (D8.3), whichever source produced the name (so `Fiserv` from `org` and from a cert merge). `name_norm` is a second unique key. |
+| Transformations | Rows with `identity_source` in (`org`, `cert_o`) are grouped by exact `name_norm`. Noise, `infrastructure_unresolved` and `null_org` rows never create a company (D4); noise hosts are counted per company only as `noise_host_count`. No fuzzy matching, no domain-derived identity (D8.3). |
+| Key columns | `company_id, company_name, name_norm, identity_source, identity_confidence, org_host_count, cert_o_host_count, host_count, distinct_host_ips, distinct_port_count, country_code, country_count, noise_host_count, noise_host_share` (14 columns, D8.4). Signal aggregates (CVSS, KEV, certs, ports, EOL) are NOT carried; stage 3 joins `hosts` on `name_norm` (D8.5). |
+| Contract | `context/contracts/companies.yml` (rules in D8.8) |
 | Owner / gate | Builder: `data-engineer` (skill `entity-resolution`). Gate: `data-quality-engineer` PASS. |
-| DQ checks | `companies <= hosts` (CLAUDE.md); `company_id` unique; **no denylist family** in `company_name` (denylist leakage); no name equal to a hyperscaler, CDN or ISP; shares of `identity_source` sum to 100%; resolved share within 5% to 20%; hand review of the 5 biggest clusters and of clusters that merge several spellings ("Acme Bank" vs "Acme Bakery"). |
+| DQ checks | `companies <= hosts` (CLAUDE.md); `company_id` and `name_norm` unique; `company_id` equals the hash of `name_norm`; **no denylist family** in `name_norm` or `company_name`; `sum(host_count)` equals the hosts rows with `identity_source` in (org, cert_o); resolved share within 5% to 20%; independent recompute from hosts equals the file; hand review of the 5 biggest clusters and of clusters that merge several raw spellings ("Acme Bank" vs "Acme Bakery"). |
 | Open check | Domain-derived tenants stay evidence-only until `data-quality-engineer` hand-reviews 50 random ones with at least 90% real, distinct companies (D4). |
 
 ### 2.4 GOLD 1: `data/gold/signals.parquet` (stage `pipeline/3_signals.py`)
@@ -224,7 +224,8 @@ Deliberately **not** used as signals:
 - `exclude` is a rule, not a score: a resolved company that fails an ICP rule (needs `icp.md`) or is dominated by noise hosts.
   **Open inconsistency to settle at M2:** D4 says noise rows never become companies, D2 says `exclude` holds
   "honeypot, C2, RAT" cases. Proposed resolution: noise hosts are dropped from company membership; a company whose
-  hosts are mostly noise (share to be calibrated) is `exclude`.
+  hosts are mostly noise (share to be calibrated) is `exclude`. **Settled in D8.6:** stage 2 records `noise_host_count` and
+  `noise_host_share`; on the spread sample only 24 companies have any noise host, so the rule is nearly inert and is calibrated, not tuned, at M2.
 - Rule-based `why`: a template that names the top one or two signals with their values, for example
   "3 hosts expose RDP; 1 CVE on the KEV list" (illustrative wording). Style rules: `account-scoring/references/why_style_guide.md`.
 
@@ -552,6 +553,9 @@ columns). A chunked read inside `1_clean.py` is likely needed; the stage stays o
 12. **Ethics and use.** Scan data describes exposure of named organisations. Outreach must not claim a breach or scare; drafts are suggestions and a human sends them (skill rules).
 13. **Network-operator residual (DQ-002, D6.7).** ISP, hosting and telecom orgs that no rule names survive as companies: 20 of the top 50 orgs, 537 rows, on the spread sample (names only, one reviewer). Generic words (`network`, `internet`, `net`, `cloud`) cannot pass the 90% gate, and a hand list does not scale to the full file. Mitigation: gated operator words, named big providers, a possible M2 fit penalty and the `review` band; the top-50 read is repeated on the full run.
     **Accepted at D7:** after the D6 denylist step 9 of the top 50 orgs by rows (18%; 16 or 32% if hosting-looking names count) still read as operators on the sample. The residual is accepted for v1 and handled by the M2 name-shape penalty and the `review` band, not by more hand entries (D7.2). Apple Inc. (20 rows, own `apple.com` hosts) stays as a company; it is an own-estate account of a very large enterprise and is not cache infrastructure.
+    **Widened at D8.2 (DQ-005):** a seeded sample of 20 single-row org names read 9 as operators, hosts or research networks (3 unsure); 3,834 of 5,395 org names are single-row. The tail is therefore not visible in a top-50 read. Mechanism: M2 `operator_name_shape` penalty and review cap, a singleton cap, and `huawei` as a family prefix; no further hand entries.
+14. **Weak cert_o identity (PIPE-004, D8.1).** About 21% of cert_o rows (23% of distinct names; 12% and 14% if UNSURE counts as tenant) are not tenants: device vendors, firmware strings, hostnames, random strings, placeholders, operators (hand review of 60 plus 57 names, one reviewer, names only; 95% interval on the unflagged part is about 6% to 24%). Kept as a source, marked `identity_confidence = low`, capped into `review` at M2. 402 of 5,797 companies (6.9%) are cert_o-only, 86% of them single-host.
+15. **Thin evidence per company.** 4,172 of 5,797 companies (71.97%) have exactly one host row (31.2% of member rows). Identity, size and exposure rest on one banner for most of the list. Mitigation: singletons cannot reach `contact` directly (D8.2); the host_count distribution is reported on every run.
 
 ---
 
@@ -636,10 +640,10 @@ with M3/M4 (independent work), and `tech-writer` can draft docs while evals run.
 
 ---
 
-## 15. Data decisions (D1-D7)
+## 15. Data decisions (D1-D8)
 
 Decided 2026-10-11 on branch `feat/senior-data-engineer/data-decisions`. **Status: proposed, pending owner approval.**
-The pipeline must not depend on any of D1-D4 until the owner approves them. D5, D6 and D7 were added later the same day, see their own status lines.
+The pipeline must not depend on any of D1-D4 until the owner approves them. D5, D6, D7 and D8 were added later the same day, see their own status lines.
 
 ### Evidence base
 - `outputs/profile_sample_100k.md`: the first 100,000 lines of the dump (1.11 GB). This is the "head sample".
@@ -877,6 +881,131 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
 3. `data-quality-engineer`: contract `context/contracts/hosts.yml` needs no new `infra_reason` value; confirm `check_hosts_extra.py` and the shared denylist check pass with the new prefixes; print the row-count top-50 operator read as a diagnostic in the report. Fix `.claude/skills/data-quality-check/scripts/test_check_contract.py::test_real_company_not_flagged`: replace the fixture `Webhosting Pioneers`, which the compound `*hosting` rule matches by design, with a true near miss such as `Ghosting Media`.
 4. `senior-data-engineer`: review the PR; verify the full-run top-50 read against the amended metric.
 
+### D8. companies layer (2_companies) specification
+*Decided by senior-data-engineer under the owner's delegation, 2026-10-11. Status: decided; the owner may overrule. Evidence: read-only DuckDB on `data/silver/hosts.parquet` (97,758 rows, spread sample, hosts layer PASS 94/94), `outputs/dq/hosts_recheck_2026-10-11.md`, ISSUES PIPE-004 and DQ-005. Nothing was rerun; `pipeline/1_clean.py` was not changed or run. Every count below is names-only or SQL on that one file; none is from the full file.*
+
+**D8.1 PIPE-004: cert_o stays an identity source, marked `identity_confidence = low`, capped into `review`**
+- **Context.** 557 cert_o rows, 428 distinct cert O strings (420 distinct `name_norm`). Hand review (data-quality-engineer): about 21% of rows and 23% of names are not tenants when UNSURE counts as not-tenant (11.7% of rows if UNSURE counts as tenant); about 79% of rows are tenants, so the 90% bar fails. The tenants are the valuable part: JPMorgan, Morgan Stanley, UnitedHealth, Siemens, BBC, Ernst & Young (10 rows), Disney, Starbucks, BASF Digital Solutions sit behind CDN or cloud ranges and appear nowhere else. cert_o-only companies: 402 names, 495 rows (3.7% of the 13,361 member rows, 6.9% of 5,797 companies); 346 of the 402 (86%) have a single host. 18 names also exist under `org` (62 cert_o rows, 78 org rows).
+- **Decision.** Keep cert_o as a source; add no name-shape guard and no further hand list. A company with no `org` host gets `identity_confidence = low`; a company with at least one `org` host is `high`, including the 18 merged names. M2 (stage 4, deterministic) treats `low` as: the company can never be in `contact` directly; a `contact_score` in the contact range is capped into `review`, and the rule-based `why` says "named only by a TLS certificate". The `review` band is where the LLM judges it, and where the eval stratum "unclear identity, by identity_source" (section 6) draws its cases.
+- **Alternatives and numbers.** (a) Drop cert_o for v1: resolved share falls from 13.67% to 13.10%, inside the 5% to 20% band, and about 117 junk rows disappear, but about 440 tenant rows and about 320 real companies disappear silently, including the enterprises above. Rejected. (b) A name-shape guard. Tested read-only on the 428 raw cert O strings: a hostname, underscore, firmware-token or random-uppercase test flags 22 names / 25 rows (4.5% of rows), about 17 of them junk (9 random strings, 6 router or firmware tokens, 2 hostnames) and 5 plausibly real, but it misses the device vendors (Dell, Grandstream, UBNT, ZTE, NETGEAR, Dahua, Foscam, Super Micro, Hanwha) and operators, which are about four fifths of the junk, and it wrongly flags `MONSTER.COM (INDIA) PRIVATE LIMITED`. Applied to the 5,516 org names the same hostname test flags 198 names / 543 rows including `Salesforce.com, Inc.` (176 rows), `Service-now.com`, `Booking.com`, `Box.com`; so it must not be applied to org names at all. Rejected as a rule: low yield, false positives, and what it catches goes to `review` anyway. (c) A device-vendor exact list: a hand list does not scale to 7.6M to 8.9M rows, and D7.2 closed hand entries. Rejected. (d) A corroboration test (a name token appears in the cert CN, hostnames or domains of its hosts): 330 of 557 rows pass; of 33 rows I could tag as junk by vendor word, 10 pass and 23 do not. Too weak to make a tier; not built.
+- **Cost of each error direction.** Junk cert_o company in `contact`: a rep sees "Grandstream" or `ZFFLSULSIDRYZJ` as an account: visible, wastes a touch, hurts list credibility. Real tenant wrongly dropped: invisible, and these are the large enterprises. With the cap neither error reaches `contact` unreviewed, and the cost is at most about 402 review items, about 0.4M Haiku input tokens at the section 7 assumption of 900 tokens per call (priced by `cost-report`, not here).
+- **Scale.** The rule is source-based, not name-based, so it needs no hand list on the full file. The share of cert_o rows and of cert_o-only singletons is reported on every run. If the full-run share of `low` companies in the `contact` candidates is high, reopen with ASN or vendor data (owner input, section 14).
+- **Consequence.** `name_shape_flag` is not created. PIPE-004 is closed as "accepted, residual in section 11.2 item 14". The contract cannot catch an unlisted device name.
+
+**D8.2 DQ-005: D7.2 stands, with three additions**
+- **Evidence.** 5,395 org names (5,387 after the `huawei` change below), 3,834 single-row; seed-5 sample of 20 single-row names: 9 operators, hosts or research networks, 3 unsure (names only, one reviewer, wide interval). On the whole `name_norm` set (5,797) the M2 word list below flags 1,042 names (18%) and 2,316 member rows (17.3%); among the 31 companies with 20 or more rows it flags 3 (True Internet, Taiwan Fixed Network, `cloud innovation`); among the 473 with 5 or more rows it flags 111 (23%). Read by hand against the nine sampled operators, the list catches all 9 (`KatCloud` only through the suffix `cloud`); that is the sample the words were read from, so it is a recall check on a known set, not an independent measurement, and it was not run as code.
+- **Decision.** The D7.2 plan (top 50 by final `contact_score`, penalty plus review cap, no more hand entries) still covers the tail in principle, but with 72% single-host companies and a 40% operator share among single-row names it needs three additions now:
+  1. **`huawei` as an org prefix** (`context/denylist_prefixes.txt`, `infra_reason = org_prefix`). Family completion, not a long-tail cleanup: `huawei cloud` is already a prefix, Huawei cert O values are rejected (D6.4), and Huawei is a telecom-equipment and cloud operator that sells security products (D1 reasoning). Gate on the surviving org names starting `huawei`: 8 names, 47 rows, 8 of 8 are Huawei group entities (`Huawei International` 34, `Huawei Clouds Chile` 5, `Huawei Singapore Clouds` 2, `Huawei South Africa Clouds` 2, `Huawei Software Technologies` 1, `Huawei Mexico Clouds` 1, two Hong Kong spellings 1 each), 0 tenants. Effect: 47 rows move to `infrastructure_unresolved`; member rows 13,361 to 13,314; resolved share 13.67% to 13.62%. A future org starting `huawei` is also matched; accepted for a closed family. `Owner: HUAWEI DO BRASIL ...` (4 rows) normalises to a name starting `owner` and is not matched; accepted.
+  2. **Operator name shape and the review cap are specified now for stage 4** (binding when M2 starts, not built in stage 2). `operator_name_shape` is true when `name_norm` matches whole words or stems: `internet`, `telecom*`, `telekom`, `telecomunica*`, `comunica*`, `communications`, `network*`, `hosting`, `hosted`, `server`, `servers`, `broadband`, `cable`, `mobile`, `data center`, `idc`, `cloud`, `infrastructure`, `fixed network`, `research`, plus the suffixes `cloud` and `hosting` (for `KatCloud`). It is a fit penalty (size calibrated by `scoring-calibration`) and, when the account would be in `contact`, a cap into `review` with `why` "name looks like a network operator". It is never an exclusion (`communications` failed the 90% gate at 78%; wrongly removed real companies vanish silently). `IP hosted by Host-Unlimited.de` is caught by `hosted`; `TIM S/A` has no operator word and is not caught (accepted residual). The data-analyst must report on a FRESH seeded sample of 20 single-row names (not seed 5) how many operators the flag catches and how many real companies it flags among the top 50 by `contact_score`.
+  3. **Singleton cap.** A company with `host_count = 1` cannot be in `contact` directly; it is capped into `review`. Reason: one banner on one IP is thin evidence of identity and of exposure, and 72% of companies are singletons. Provisional: at calibration the data-analyst prints how many of the would-be contact accounts are singletons; if the cap empties the `contact` band or exceeds the LLM budget, the owner decides between a fit weight on `host_count` alone and a higher host count (2 or 3). No `org_host_count` fit weight beyond the existing `footprint_size` signal (section 3.1) is added; `host_count` is carried in stage 2 for it.
+- **Not added.** `TIM S/A`, `IP hosted by Host-Unlimited.de`, True Internet, Taiwan Fixed Network, Leaseweb USA and the other names stay out of the denylist (D7.2b holds).
+- **Cost of each error direction.** Missed operator: visible false account, partly caught by the cap. Wrongly capped real company: still listed in `review`, judged by the LLM, so the loss is delay and tokens, not disappearance. The flag flags 18% of companies, so the review load is bounded by the contact band only, not by 18% of all companies.
+- **Scale and trigger.** The flag is word-based and needs no per-run hand list. D7.2a reopen trigger unchanged (more than 5 of the top 50 by final `contact_score` read as operators on the full run).
+
+**D8.3 Grain, `company_id`, who participates, what is not merged**
+- **Participation.** A hosts row participates iff `identity_source` is `org` or `cert_o` (so `name_norm` is not null, enforced by the hosts contract). `noise`, `infrastructure_unresolved` and `null_org` rows never create or enlarge a company (D4). 13,361 of 97,758 sample rows participate (12,804 org + 557 cert_o).
+- **Grouping key.** Exact equality of `name_norm` (the stage 1 normaliser: case, punctuation, legal suffix, D1 prefix families), across both sources. A company named under `org` and under `cert_o` is one company: 18 names on the sample (78 org rows + 62 cert_o rows). Precision over recall (CLAUDE.md): **no fuzzy, no edit-distance, no token-set matching, no domain- or hostname-derived merging** (D4 rule 3b stays closed until the 50-row check), no parent-subsidiary merging (`Adobe` and `Adobe Systems` stay apart if their `name_norm` differs). The known cost is split companies (recall); it is reported through the "raw spellings per company" line, not hidden. 5,944 raw strings (5,516 org + 428 cert O) collapse to 5,797 names (147 merges by normalisation, including the 18 cross-source).
+- **Source of a merged company.** `identity_source = 'org'` if any of its hosts has `identity_source = 'org'`, else `'cert_o'`. `org_host_count` and `cert_o_host_count` keep the split. `identity_confidence = 'high'` iff `org_host_count > 0`, else `'low'` (D8.1). Per D4 an `org` host and a cert O never disagree inside one row; across rows the `org` hosts win the source label and the cert_o hosts still count in `host_count` and in the footprint (their facts are limited by the stage 3 CDN rule of D6.4).
+- **`company_id`.** `lower(hex(sha256(name_norm)))`, first 16 characters (64 bits), computed on the UTF-8 bytes of `name_norm` (DuckDB `substr(sha256(name_norm), 1, 16)`, which returns lowercase hex). Why a content hash: it must be identical across runs, across the sample and the full file, across machines and independent of row order, so labels in `evals/labeled.jsonl`, traces (`account_id`) and cached LLM results keyed by `account_id` stay valid. Not DuckDB `hash()` (not guaranteed stable across versions), not a sequence number (changes with the data). Collision risk at 10^6 names is about 3e-8; the contract's uniqueness check would catch one. `account_id` equals `company_id` (section 2.5). **Stability limit:** the id is stable only while the stage 1 normaliser is unchanged; any change to normalisation rules changes ids. Therefore labelled eval rows must also store `company_name`, and a normaliser change after labelling needs an id migration recorded in ISSUES.
+- **Output order.** `ORDER BY company_id`, so reruns give identical files. Parquet, zstd.
+
+**D8.4 Columns of `companies.parquet` (14, grain one row per company)**
+
+| column | type | rule |
+|---|---|---|
+| `company_id` | VARCHAR(16) | D8.3. Not null, unique. |
+| `company_name` | VARCHAR | Display name, deterministic: among the participating hosts of this `name_norm`, take the most frequent raw text (`org` for org-source hosts when the company has any, else `cert_subject_o`); ties broken first by "not all upper case" (so `ServiceNow, Inc.` beats `SERVICENOW, INC.`), then by byte-order ascending. Never empty. Raw text, not the normalised name. |
+| `name_norm` | VARCHAR | The grouping key from stage 1. Not null, unique. |
+| `identity_source` | VARCHAR | `org` or `cert_o` (D8.3). |
+| `identity_confidence` | VARCHAR | `high` or `low` (D8.1). |
+| `org_host_count` | INTEGER | Hosts rows with `identity_source = 'org'`. |
+| `cert_o_host_count` | INTEGER | Hosts rows with `identity_source = 'cert_o'`. |
+| `host_count` | INTEGER | `org_host_count + cert_o_host_count`, at least 1. Counts host rows (ip, port, transport), not IPs. |
+| `distinct_host_ips` | INTEGER | `count(DISTINCT host_ip)` over participating hosts; between 1 and `host_count`. |
+| `distinct_port_count` | INTEGER | `count(DISTINCT port)` over participating hosts; between 1 and `host_count`. The port list is not carried (stage 3 reads ports from hosts). |
+| `country_code` | VARCHAR | Majority country of the participating hosts' IPs (nulls ignored); ties broken by the smallest ISO code (87 companies tie on the sample). Null only if every host has a null country. This is the host country, not headquarters (section 3.1 `in_territory`). |
+| `country_count` | INTEGER | Distinct non-null countries; 0 iff `country_code` is null. |
+| `noise_host_count` | INTEGER | Noise rows attributed to this company: hosts rows with `is_noise` whose `org_norm` equals the company's `name_norm`. Not part of `host_count`. Noise rows are attributed through `org_norm` only (they have `name_norm` null by D4), so a cert_o-only company has 0. |
+| `noise_host_share` | DOUBLE | `noise_host_count / (noise_host_count + host_count)`, in 0 to 1. Input for the M2 `exclude` rule (D8.6). |
+
+Dropped from the earlier section 2.3 list: `country_codes` (replaced by `country_code`, `country_count`), `evidence_domains` and `cert_o` (hostnames, domains and cert O are evidence only in v1, read from `hosts` in stage 3 when needed; carrying them here would add lists with tie-order risk and no consumer).
+
+**D8.5 What lives in stage 2 and what in stage 3: stage 2 carries identity and footprint only**
+- **Decision.** No signal aggregate (max CVSS, KEV, expiry, EOL, legacy TLS, risky ports, tags) is computed in stage 2. Stage 3 reads `companies` for the spine and joins `hosts` for the facts. Reasons: signals are decided and calibrated in M2 and change more often than identity; precomputing them here would freeze a signal list the owner has not approved; the D6.4 rule (for cert_o companies count host-borne facts only from hosts not tagged `cdn`) needs host-level filtering that only stage 3 should own.
+- **Join contract (no fan-out).** Stage 3 starts from `companies` (one row per `company_id`) and `LEFT JOIN`s a hosts aggregate built `GROUP BY name_norm` over rows with `identity_source IN ('org','cert_o')`, joined on `name_norm`, which is unique in `companies`. Noise hosts have `name_norm` null and never join. The output must have exactly one row per `company_id`; the signals contract checks `signals rows == companies rows` and unique `company_id`. `host_count`, `distinct_host_ips`, `distinct_port_count` are reused from stage 2 as `footprint_size` inputs, not recomputed, and a stage 3 check asserts they equal the join recount.
+
+**D8.6 Noise handling**
+- Noise hosts do not create companies and do not count in `host_count`. Evidence on the sample: 1,136 noise rows; 1,081 of them are on infrastructure rows (their `org_norm` is an infrastructure name and matches no company); 33 rows match 24 companies by `org_norm`; 22 rows (non-infrastructure) belong to org names that have no company; 94 org names (1,103 rows) are noise-only and are reported, not created. Of the 24 companies with a noise host, 8 have `noise_host_share` of 0.2 or more and 4 of 0.5 or more (for example `sc lithuanian radio and tv center` 3 noise to 2 hosts; `avago technologies u s` 4 to 236 = 1.7%).
+- Rule for M2: a company with `noise_host_share` at or above a threshold (calibrated by the data-analyst, not set here; 0.5 is the starting point to preview) is `exclude`, with `why` "mostly honeypot or attacker-infrastructure hosts". On the sample this affects 4 companies; the rule is kept because it is cheap, explainable and scales, not because it is large.
+- Known gap: a noise host on a cert_o-only company, or on an org whose name was changed by the denylist, is not attributed. Accepted (noise is 1.16% of rows).
+
+**D8.7 Reporting: what `2_companies` prints and writes**
+Prints and writes `outputs/dq/companies_stage_<date>.md` (the `companies_<date>.md` name is left to the data-quality-engineer's contract report). Sections, in this order; every number printed with its denominator:
+1. **Headline.** The unresolved share: rows not in (`org`, `cert_o`) divided by hosts rows, as "X% of scanned services cannot be attributed to a customer"; and the resolved share. This number replaces the "about 86%" in section 2.0 and the README (note that the 86% there is infrastructure alone; unresolved includes noise and null_org). Sample (after the `huawei` change): resolved 13.62%, unresolved 86.38%.
+2. **Rows and distinct `host_ip` per `identity_source`** (`org`, `cert_o`, `noise`, `infrastructure_unresolved`, `null_org`). Row shares sum to 100.00% (asserted). Distinct-IP shares are computed on the D4 precedence (an IP takes the first source it has a row in: noise, org, cert_o, infrastructure_unresolved, null_org) so they also sum to 100%; the raw per-source distinct counts and the number of IPs in more than one source (164 on the sample) are printed beside them, because an IP can carry several ports.
+3. **Infrastructure breakdown.** `infra_reason` counts and shares of infrastructure rows (seven values; the value set must equal the hosts contract's, and `ip_pattern` is expected to be 0 as in the hosts report), and the infrastructure share of all rows.
+4. **Companies.** Total; per `identity_source` and per `identity_confidence`; companies with both sources; `companies <= hosts` asserted.
+5. **Host-count distribution per company.** Singletons (count and share of companies and of member rows), 2, 3 to 5, 6 to 20, 21 to 100, over 100, median, p90, p99, max.
+6. **Raw spellings.** Distinct raw org and cert O strings versus companies; the companies with the most raw spellings (the merge review list).
+7. **Top 20 companies** by `host_count` with name, source, confidence, host and IP counts, country.
+8. **Noise.** Rows attributed, companies with noise, companies at or above 0.5, noise-only org names.
+9. **Row-count reconciliation hosts to companies,** every difference explained (below).
+10. **Five random company rows** and null rates of every column (CLAUDE.md stage report).
+Reconciliation, sample, before the `huawei` change: 97,758 hosts rows = 83,064 `infrastructure_unresolved` + 1,136 `noise` + 197 `null_org` (84,397 rows that never create a company) + 13,361 member rows (12,804 org + 557 cert_o). The 13,361 member rows group into 5,797 companies; 7,564 rows are absorbed into existing companies by exact `name_norm`. Nothing else may differ; any other difference is a bug.
+
+**D8.8 Contract rules for `context/contracts/companies.yml` (data-quality-engineer)**
+1. Key `company_id`: unique, not null; `name_norm` unique, not null; `company_id` matches `^[0-9a-f]{16}$` and equals `substr(sha256(name_norm), 1, 16)` for every row.
+2. `row_rule`: companies rows <= hosts rows (CLAUDE.md).
+3. Column types and ranges from meaning (14 columns exactly): `host_count >= 1`; `host_count = org_host_count + cert_o_host_count`; `distinct_host_ips` and `distinct_port_count` between 1 and `host_count`; ports 0 to 65535 implied; `country_count >= 0`, and `country_count = 0` iff `country_code` is null; `country_code` two letters when present; `noise_host_count >= 0`; `noise_host_share` between 0 and 1 and equal to its formula.
+4. `identity_source` in (`org`, `cert_o`); `identity_confidence` in (`high`, `low`); `identity_source = 'org'` iff `org_host_count > 0`; `identity_confidence = 'high'` iff `org_host_count > 0`.
+5. Non-empty, trimmed `company_name` and `name_norm`.
+6. Denylist: `name_norm` and `company_name` pass the shared matcher with 0 hits (the generic runner covers `name_norm`; `company_name` is a custom check, `check_companies_extra.py`).
+7. Cross-file reconciliation (custom check, reads hosts): `sum(host_count)` equals the hosts rows with `identity_source` in (org, cert_o) (13,361 on the sample before the `huawei` change); `sum(org_host_count)` and `sum(cert_o_host_count)` equal the per-source hosts counts; resolved share `sum(host_count) / hosts rows` between 5% and 20%; no company whose `name_norm` is absent from hosts members, and no member `name_norm` absent from companies.
+8. Independent recompute: a separate query on hosts reproduces `host_count`, `distinct_host_ips`, `distinct_port_count`, `country_code`, `noise_host_count` per `name_norm` with 0 disagreements (same method as the hosts recheck).
+9. Mutation test as for hosts: break a hash, a `host_count`, a source label, and a noise attribution in a scratch copy; the contract must fail each.
+10. Hand review, recorded in the DQ report: the top 20 by `host_count`, the 20 companies with the most raw spellings (false-merge read), 20 random singletons (names only), and the cert_o-only companies that rank in the top 20 of their group. Not a gate; recorded.
+The shares check in the hosts contract is not repeated; the resolved-share range check here is the stage 2 form.
+
+**D8.9 Run mode**
+Dev run: the 100K spread sample only. The script has a `--full` flag that selects the full-run hosts file by the same convention stage 1 uses; it is wired and tested on a tiny fixture but **not run** until `data-quality-engineer` has passed the sample and the owner (or the QA gate) approves. DuckDB reads one `GROUP BY` over the hosts parquet; at 7.6M to 8.9M rows (estimate) this fits comfortably, but memory and time on the full file are unmeasured.
+
+**D8.10 Expected numbers on the spread sample (for the data-engineer to check against; derived from `data/silver/hosts.parquet`)**
+
+| quantity | before `huawei` prefix (current hosts file) | after (hosts rerun with `huawei` prefix) |
+|---|---|---|
+| hosts rows | 97,758 | 97,758 |
+| member rows (org + cert_o) | 13,361 (13.67%) | 13,314 (13.62%) |
+| org / cert_o rows | 12,804 / 557 | 12,757 / 557 |
+| `infrastructure_unresolved` rows | 83,064 | 83,111 |
+| noise / null_org rows | 1,136 / 197 | 1,136 / 197 |
+| companies | 5,797 | 5,789 |
+| source `org` / `cert_o` (cert_o-only) | 5,395 / 402 | 5,387 / 402 |
+| both sources merged | 18 (78 org + 62 cert_o rows) | 18 |
+| `identity_confidence` high / low | 5,395 / 402 | 5,387 / 402 |
+| singleton companies (share of companies) | 4,172 (71.97%) | 4,168 (72.00%) |
+| companies with 2 / 3 to 5 / 6 to 20 / 21 to 100 / over 100 rows | 689 / 569 / 337 / 23 / 7 | 687 / 568 / 337 / 22 / 7 (the 8 Huawei names are 4 singletons, 2 two-row names, 1 five-row name and `huawei international` with 34 rows) |
+| median / p90 / p99 / max host_count | 1 / 4 / 16 / 330 | 1 / 4 / 16 / 330 |
+| distinct `host_ip`: all / members | 84,648 / 12,382 | 84,648 / 12,337 |
+| distinct-IP shares by D4 precedence: noise / org / cert_o / infra / null_org | 1,001 (1.18%) / 11,820 (13.96%) / 552 (0.65%) / 71,086 (83.98%) / 189 (0.22%) | org and infra shift by the Huawei IPs only (about 45) |
+| IPs in more than one source | 164 | about 164 |
+| raw org strings / raw cert O strings | 5,516 / 428 | 5,508 / 428 |
+| companies with a noise host | 24 (33 rows), 4 at share 0.5 or more | same |
+| noise-only org names (rows) | 94 (1,103) | same |
+| cert_o-only singletons | 346 of 402 (86.1%) | same |
+
+Top by `host_count` (name_norm, host rows), both columns: egnyte 330, fiserv solutions 328, wal mart stores 248, avago technologies u s 236, salesforce com 181, servicenow 155, tgs management 148, zoho 95, los angeles municipal court 86, equifax 70, guangzhoushi guangbodianshiwangluo 64, the prudential insurance company of america 58, ultimate software group 53, new york mercantile exchange 42, then `huawei international` 34 (before only; it is gone after), adobe 27, digital snap 26, office of info tech admin for educational development 26, accenture 25, keybank national association 25 (ties are listed by rows descending, then `name_norm` ascending; after the change the list moves up by one place from rank 15, and `ncr` 24 or `queen mary university of london` 24 can enter at rank 20). The "after" column is my arithmetic from the Huawei rows (8 names, 47 rows), not a re-run; the data-engineer's own printed numbers decide, and a difference is explained in the stage report, not forced to match. Note that `distinct_host_ips` of a company can be less than its rows (ports): `egnyte` 330 rows on 136 IPs.
+
+**D8 instruction list (ordered; one owner per step)**
+1. `data-integrator`: add `huawei` to `context/denylist_prefixes.txt` with the 8-of-8 name gate recorded in `outputs/denylist_cleanup_review.md` (new section, cite D8.2); pin test cases in `scripts/test_denylist_match.py` (`Huawei International`, `Huawei Clouds Chile` and `Huawei Software Technologies` are infrastructure; note a prefix also matches any future org starting `huawei`; `Owner: HUAWEI DO BRASIL` is not matched); update RAW-013; add no other name (True Internet, Taiwan Fixed Network, Leaseweb, TIM S/A and `Host-Unlimited` stay out, D7.2b).
+2. `data-engineer`, step A (`pipeline/1_clean.py`, rerun only): rerun stage 1 on the spread sample so that the `huawei` prefix is applied; print the new `identity_source` counts (expect `org` 12,757, `infrastructure_unresolved` 83,111, resolved 13.62%); no code change is expected in stage 1 (the prefix is data). Hand the new hosts file to the data-quality-engineer for the hosts contract (step 3) before step B.
+3. `data-quality-engineer`, hosts: rerun `hosts.yml` and `check_hosts_extra.py` on the new hosts file (the `name_norm` denylist check must still pass with 0 hits); update ISSUES: PIPE-004 closed "accepted, D8.1, section 11.2 item 14", DQ-005 "decided D8.2" with the three additions and the M2 requirements.
+4. `data-engineer`, step B: build `pipeline/2_companies.py` and `scripts/test_2_companies.py` (skills `pipeline-stage-build`, `entity-resolution`) per D8.3 to D8.9; one script, DuckDB, no LLM, no denylist logic, no fuzzy matching; one-line docstrings; tests for: hash stability and format, tie-breaks (company_name, country), cross-source merge, noise attribution, singleton, reconciliation arithmetic, `--full` flag parse. Run on the sample only; print the D8.7 report and compare with D8.10; explain every difference.
+5. `data-quality-engineer`, companies: write `context/contracts/companies.yml` and `check_companies_extra.py` per D8.8; run, mutation-test, write `outputs/dq/companies_<date>.md`; PASS or FAIL with evidence; log bugs in ISSUES with the contract rule that catches them.
+6. `senior-data-engineer`: review the PR; before M2, specify `3_signals` joins per D8.5 and the stage 4 additions per D8.1, D8.2 and D8.6.
+7. M2 (later, `data-engineer` and `data-analyst`): implement `operator_name_shape`, the `low` confidence cap, the singleton cap and the noise `exclude` rule in `4_score.py`; calibrate the penalty and thresholds; report singleton and `low` counts in the contact candidates; labelled eval set must include operator, cert_o-only and singleton cases (owner labels).
+
+**Risks of D8.** (1) The `huawei` prefix is a hand entry that D7.2 said not to add; it is justified as family completion and is the only one. (2) A normaliser change breaks `company_id` stability and eval labels. (3) 72% singleton companies and 86% single-host cert_o-only companies mean the `contact` band after the caps may be small; this is a calibration question, not a design flaw, but it may force the owner to relax the singleton cap. (4) The review load grows by `low` and singleton and operator-shaped contact candidates; cost is linear in the band size (section 7). (5) The word list flags 18% of names and has not been measured for false positives on a fresh sample. (6) All identity judgements are names-only by a single reviewer on one 100K sample. (7) Noise attribution is by `org_norm` only.
+
 ### Denylist changes implied (for data-integrator / owner to apply to `context/denylist.txt`)
 1. Keep: microsoft*, oracle*, ibm, ibm cloud, softlayer*, zscaler*, palo alto networks*, imperva*, incapsula*,
    fastly*, shopify*, squarespace*, wix*, vercel*, bitly*. No removals.
@@ -899,8 +1028,9 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   latest timestamp. Set `host_ip = coalesce(ip_str, ipv6)` and parse cert dates with sentinels nulled (RAW-007).
   Add the flags `is_infrastructure`, `infra_reason`, `is_noise` and `identity_source`. Do **not** drop
   infrastructure rows in stage 1, so that stage 2 can report shares that sum to 100%.
-- **`2_companies`:** apply the D4 precedence and the unresolved report. Contract checks: companies <= hosts, no
-  denylist family in company names, shares sum to 100%, and a resolved share between 5% and 20%.
+- **`2_companies`:** group the stage 1 `org` and `cert_o` rows by `name_norm` and write the unresolved report, as specified in D8
+  (D4 precedence is applied in stage 1, not repeated). Contract checks: companies <= hosts, no denylist family in company
+  names, shares sum to 100%, and a resolved share between 5% and 20% (D8.8).
 - **Scoring:** no recency signal. Port signals are calibrated only on the spread sample.
 
 ### Known weaknesses of these decisions
