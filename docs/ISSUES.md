@@ -330,3 +330,9 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Root cause: by design (D10 gates the `contact` side only; the adjudicator at M3 judges every `review` row). Review membership is not a recommendation, and the app must not present a threshold-only review row as a contact candidate.
 - Fix: none. For the data-analyst and the M3 prompt: the operator-or-organisation question must be asked for every review row, not only for would-be contacts (D10 item 2 says the prompt asks it first; confirm at M3).
 - Contract rule: none can catch an unlisted operator name (same limit as DQ-009). The review report prints the operator-shaped count among threshold-only review accounts (174).
+
+## PIPE-007 `verify_4_score.py` crashes with UnicodeEncodeError when it prints a disagreement for a non-ASCII company name on a Windows console
+- Symptom: the first run of the D11 verifier with disagreements raised `UnicodeEncodeError: 'charmap' codec can't encode characters` at the `print(f"DISAGREE ...")` line, hiding the rest of the output (the stage itself was not affected; with 0 disagreements nothing is printed, so the bug stayed latent).
+- Root cause: the Windows console encoding is cp1252 and company names carry other scripts.
+- Fix: `sys.stdout.reconfigure(encoding="utf-8")` at the start of `main()` in `scripts/verify_4_score.py`.
+- Contract rule: none (a verification script, not a data layer); rerun `python scripts/verify_4_score.py --all` and expect 0 disagreements.

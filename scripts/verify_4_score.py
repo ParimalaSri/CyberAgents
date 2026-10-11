@@ -1,4 +1,4 @@
-"""Independent recompute of 4_score from D9 in plain Python (own constants, no import of the stage); compares scores, bands, caps and top_signals."""
+"""Independent recompute of 4_score from D9, D10 and D11 in plain Python (own constants, no import of the stage); compares scores, bands, caps, top_signals and why phrases."""
 import argparse
 import random
 import sys
@@ -12,6 +12,12 @@ SIGNALS = ROOT / "data" / "gold" / "signals.parquet"
 ACCOUNTS = ROOT / "data" / "gold" / "accounts.parquet"
 FORBIDDEN_WORDS = ("breach", "compromised", "hacked")
 CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10 text
+OPERATOR_CLAUSE = "Name looks like a network operator."  # D10 cap clause, D11.3 also on operator-shaped review rows
+SKIP_CLAUSE = "Below the review cut-off."  # D11.3
+KEV_PHRASE = "running software whose version matches the CISA known-exploited list"  # D11.3
+CVSS_PHRASE = "worst version-matched vulnerability scores CVSS"  # D11.3
+OLD_PHRASES = ("Exposure is limited.", "with a vulnerability on the CISA", "worst vulnerability scores", "Hosts located in", "known-exploited host", "is vulnerable")  # must not appear after D11
+TERRITORY_POINTS = 0  # D11.5
 
 
 def urgency_of(s):
@@ -31,8 +37,8 @@ def urgency_of(s):
 
 
 def fit_of(s):
-    """Return the D9.7 provisional fit: territory 35, footprint band x 15, sensitive 20, minus 30 for the T1-or-T2 union flag (D10), clipped to 0..100."""
-    pts = (35 if s["in_territory"] else 0) + 15 * s["footprint_band"] + (20 if s["sensitive_stack"] else 0) - (30 if (s["operator_shape_t1"] or s["operator_shape_t2"]) else 0)
+    """Return the D9.7 provisional fit with territory points 0 (D11.5): footprint band x 15, sensitive 20, minus 30 for the T1-or-T2 union flag (D10), clipped to 0..100."""
+    pts = (TERRITORY_POINTS if s["in_territory"] else 0) + 15 * s["footprint_band"] + (20 if s["sensitive_stack"] else 0) - (30 if (s["operator_shape_t1"] or s["operator_shape_t2"]) else 0)
     return max(0, min(100, pts))
 
 
@@ -42,8 +48,8 @@ def contact_of(urgency, fit):
     return int((x + Fraction(1, 2)) // 1)
 
 
-def band_of(s, contact, contact_x, review_y):
-    """Return (band_uncapped, cap_reasons, band) per D9.6 item 5."""
+def band_of(s, contact, contact_x, review_y, rank, review_n):
+    """Return (band_uncapped, cap_reasons, band) per D9.6 item 5, D10 and D11.2 (rank is the 1-based position among non-excluded accounts in the stage order)."""
     if s["noise_host_count"] >= 2 and s["noise_host_share"] >= 0.5:
         return "exclude", None, "exclude"
     unc = "contact" if contact >= contact_x else "review" if contact >= review_y else "skip"
@@ -56,7 +62,8 @@ def band_of(s, contact, contact_x, review_y):
             reasons.append("operator_name_shape")
         if s["host_count"] == 1:
             reasons.append("singleton")
-    return unc, (",".join(sorted(reasons)) or None), ("review" if reasons else unc)
+    band = "review" if reasons or (rank <= review_n and contact >= review_y) else "skip"
+    return unc, (",".join(sorted(reasons)) or None), band
 
 
 def top_signals_of(s, urgency):
@@ -76,7 +83,7 @@ def top_signals_of(s, urgency):
     for i, (pts, name) in enumerate(((10, "eol_stack"), (5, "cert_expired_or_soon"), (5, "legacy_tls"))):
         if s[name]:
             cands.append((pts, 2, i, name))
-    for i, (pts, name) in enumerate(((15 * s["footprint_band"], "footprint_band"), (35 if s["in_territory"] else 0, "in_territory"),
+    for i, (pts, name) in enumerate(((15 * s["footprint_band"], "footprint_band"), (TERRITORY_POINTS if s["in_territory"] else 0, "in_territory"),
                                      (20 if s["sensitive_stack"] else 0, "sensitive_stack"))):
         if pts > 0:
             cands.append((pts, 3, i, name))
@@ -91,12 +98,12 @@ def load(con, path):
     return [dict(zip(names, r)) for r in cur.fetchall()]
 
 
-def check_account(sig, acc, contact_x, review_y):
+def check_account(sig, acc, contact_x, review_y, rank, review_n):
     """Return a list of disagreement strings for one company between the independent recompute and the stage output."""
     problems = []
     u, f = urgency_of(sig), fit_of(sig)
     c = contact_of(u, f)
-    unc, reasons, band = band_of(sig, c, contact_x, review_y)
+    unc, reasons, band = band_of(sig, c, contact_x, review_y, rank, review_n)
     for label, mine, theirs in (("urgency", u, acc["urgency_score"]), ("fit", f, acc["fit_score"]), ("contact", c, acc["contact_score"]),
                                 ("band_uncapped", unc, acc["band_uncapped"]), ("cap_reasons", reasons, acc["cap_reasons"]), ("band", band, acc["band"])):
         if mine != theirs:
@@ -110,6 +117,20 @@ def check_account(sig, acc, contact_x, review_y):
     why = acc["why"] or ""
     if (unc == "contact") != why.endswith(CLAUSE) or (unc != "contact" and CLAUSE in why):
         problems.append(f"D10 clause wrong for band_uncapped {unc}: {why!r}")
+    if band == "skip" and u > 0 and not why.startswith("No exposure") and SKIP_CLAUSE not in why:
+        problems.append(f"skip why lacks the D11.3 clause: {why!r}")
+    if band != "skip" and SKIP_CLAUSE in why:
+        problems.append(f"skip clause on a {band} row: {why!r}")
+    if band == "review" and sig["operator_name_shape"] and OPERATOR_CLAUSE not in why:
+        problems.append(f"operator-shaped review row without the operator clause: {why!r}")
+    if band != "review" and OPERATOR_CLAUSE in why:
+        problems.append(f"operator clause on a {band} row: {why!r}")
+    if sig["kev_exposed"] and "kev_exposed" in (acc["top_signals"] or "") and KEV_PHRASE.lower() not in why.lower():
+        problems.append(f"KEV top signal without the D11.3 phrase: {why!r}")
+    if "max_cvss_band" in (acc["top_signals"] or "") and CVSS_PHRASE.lower() not in why.lower():
+        problems.append(f"CVSS top signal without the D11.3 phrase: {why!r}")
+    if any(old in why for old in OLD_PHRASES):
+        problems.append(f"pre-D11 phrase in why: {why!r}")
     words = len(why.split())
     if not why.strip() or words > 40 or "=" in why or "_" in why or any(w in why.lower() for w in FORBIDDEN_WORDS):
         problems.append(f"why fails shape rules ({words} words): {why!r}")
@@ -122,6 +143,17 @@ def check_account(sig, acc, contact_x, review_y):
     return problems
 
 
+def rank_accounts(sigs):
+    """Return {company_id: 1-based rank} over non-excluded companies by contact desc, urgency desc, host_count desc, id asc, recomputed from the signals."""
+    keyed = []
+    for cid, s in sigs.items():
+        if s["noise_host_count"] >= 2 and s["noise_host_share"] >= 0.5:
+            continue
+        u = urgency_of(s)
+        keyed.append((-contact_of(u, fit_of(s)), -u, -s["host_count"], cid))
+    return {k[3]: i for i, k in enumerate(sorted(keyed), 1)}
+
+
 def main():
     """Verify 200 random companies plus the top 25 and every exclude row (or all with --all); print disagreements and return 1 if any."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -129,10 +161,12 @@ def main():
     parser.add_argument("--accounts", default=str(ACCOUNTS))
     parser.add_argument("--contact", type=int, default=40)
     parser.add_argument("--review", type=int, default=20)
+    parser.add_argument("--review-n", type=int, default=200)
     parser.add_argument("--sample", type=int, default=200)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--all", action="store_true", help="check every company")
     args = parser.parse_args()
+    sys.stdout.reconfigure(encoding="utf-8")  # company names are not ASCII; the Windows console default (cp1252) crashed on printing a disagreement
     con = duckdb.connect()
     sigs = {r["company_id"]: r for r in load(con, args.signals)}
     accs = load(con, args.accounts)
@@ -141,10 +175,11 @@ def main():
     picked |= {a["account_id"] for a in accs[:25]} | {a["account_id"] for a in accs if a["band"] == "exclude"}
     if args.all:
         picked = set(sigs)
+    ranks = rank_accounts(sigs)
     bad = 0
     for acc in accs:
         if acc["account_id"] in picked:
-            for p in check_account(sigs[acc["account_id"]], acc, args.contact, args.review):
+            for p in check_account(sigs[acc["account_id"]], acc, args.contact, args.review, ranks.get(acc["account_id"], 10**9), args.review_n):
                 bad += 1
                 print(f"DISAGREE {acc['account_id']} {acc['company_name']}: {p}")
     order_ok = all((accs[i]["contact_score"], accs[i]["urgency_score"], accs[i]["host_count"]) >=

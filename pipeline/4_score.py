@@ -31,7 +31,7 @@ PTS_RISKY_SSH_ONLY = 5  # risky_service_exposed without risky_non_ssh_exposed
 PTS_EOL = 10  # urgency, hygiene: the three are summed
 PTS_CERT = 5
 PTS_LEGACY_TLS = 5
-PTS_TERRITORY = 35  # fit: in_territory (the territory list in stage 3 is itself a placeholder)
+IN_TERRITORY_POINTS = 0  # fit: in_territory; D11.5 sets 0 (neutral) until the owner supplies the territory list, then 35 (D9.7); the stage 3 column stays a US-only placeholder and is not scored
 PTS_FOOTPRINT_PER_BAND = 15  # fit: footprint_band x 15
 PTS_SENSITIVE = 20  # fit: sensitive_stack
 PENALTY_OPERATOR = 30  # fit: subtracted when operator_name_shape (the T1-or-T2 union) is true; D10, provisional until the data-analyst T2 gate (D9.5)
@@ -39,7 +39,8 @@ FLOOR_PCT = 50  # contact form (b): FLOOR = 0.50, kept as a whole percent so the
 CONTACT_FORM = "b"  # "b" urgency gated by fit (recommended in D9.6 item 4); "a" weighted sum, kept only for the calibration comparison
 W_F_PCT = 30  # form (a) only: weight of fit in percent; D9 gives no value, so this is a placeholder invented only to exercise form (a)
 THRESHOLD_CONTACT = 40  # X
-THRESHOLD_REVIEW = 20  # Y
+THRESHOLD_REVIEW = 20  # Y; since D11.2 it is the FLOOR of the top-N review band (REVIEW_FLOOR) and the band_uncapped review edge
+REVIEW_N = 200  # D11.2: total accounts in review (every would-be contact plus the best remaining by the stage sort); placeholder N = ceil(C / r), C = 50 per week, r = 0.25, owner supplies C
 # ======================================================================================================================
 # End of PROVISIONAL block. The constants below are decided (D9.3, D9.6) or are display tables, not weights.
 # ======================================================================================================================
@@ -50,19 +51,25 @@ CAP_LOW_CONFIDENCE = "low_confidence"
 CAP_OPERATOR = "operator_name_shape"
 CAP_UNVERIFIED = "operator_unverified"  # D10: every would-be contact is held in review until an adjudicator or ASN reference checks it
 UNVERIFIED_CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10 text, appended last for every would-be contact
+OPERATOR_CLAUSE = "Name looks like a network operator."  # D10 cap clause; D11.3 also puts it on any other review row with operator_name_shape
+SKIP_CLAUSE = "Below the review cut-off."  # D11.3: replaces "Exposure is limited."; a statement about the score and the cut, not a risk judgement
+KEV_PHRASE = "running software whose version matches the CISA known-exploited list"  # D11.3 (RAW-006): the CVE is inferred from a banner version, never stated as fact
+CVSS_PHRASE = "worst version-matched vulnerability scores CVSS"  # D11.3 (RAW-006)
 CAP_CLAUSES = (  # priority order for the single cap clause in the why
-    (CAP_OPERATOR, "Name looks like a network operator."),
+    (CAP_OPERATOR, OPERATOR_CLAUSE),
     (CAP_SINGLETON, "Only one host seen."),
     (CAP_LOW_CONFIDENCE, "Named only by a TLS certificate."),
 )
-WHY_MAX_WORDS = 40
+WHY_MAX_WORDS = 40  # D9.6 item 7
 PORT_NAMES = {22: "SSH", 3389: "RDP", 445: "SMB", 3306: "MySQL", 6379: "Redis", 27017: "MongoDB", 9200: "Elasticsearch", 5900: "VNC",
               23: "Telnet", 2375: "Docker"}
 PORTS_SHOWN = 2  # at most this many ports are named in a why
 SSH_PORT = 22
 BANDS = ("contact", "review", "skip", "exclude")
-D10_EXPECTED = {"contact": "0", "review": "about 660", "skip": "about 5,125", "exclude": "1"}  # senior's D10 expectation at 40 / 20 on the sample
-PREVIOUS_RUN = {"contact": 70, "review": 594, "skip": 5125, "exclude": 1}  # this stage before D10 (T1-only penalty, caps for singleton, low confidence, operator shape), 40 / 20
+D11_EXPECTED = {"contact": "0", "review": "200 (N), or the would-be contacts if more", "skip": "5,589 (the rest)", "exclude": "1"}  # senior's D11 expectation at N = 200 on the sample
+PREVIOUS_RUN = {"contact": 0, "review": 664, "skip": 5125, "exclude": 1}  # the D10 run (threshold-only review at Y = 20, territory 35, T2 with the net branch), 40 / 20
+D11_EXPECTED_WOULD_BE = 51  # D11.5: about 51 would-be contacts after territory 0 (ablation); the stage prints the measured count
+D11_EXPECTED_TIE = (34, 22)  # D11.2: cut score and tie size measured by the senior before the territory change
 COMPARE_PAIRS = ((45, 25), (40, 20), (35, 15))
 TOP_N = 25
 HISTOGRAM_BUCKETS = 10
@@ -96,11 +103,11 @@ def cvss_points_sql():
     return f"CASE max_cvss_band {whens} ELSE 0 END"
 
 
-def band_sql(contact, review):
-    """Return a SQL CASE expression for the final band at the given thresholds, in D9.6 order: exclude, thresholds, then caps."""
+def band_sql(contact, review, review_n):
+    """Return a SQL CASE expression for the band: exclude, then every would-be contact held in review (D10), then the top review_n by review_rank with contact_score >= review (D11.2), else skip."""
     exclude = f"(noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})"
-    uncapped = f"CASE WHEN contact_score >= {contact} THEN 'contact' WHEN contact_score >= {review} THEN 'review' ELSE 'skip' END"
-    return f"CASE WHEN {exclude} THEN 'exclude' WHEN contact_score >= {contact} THEN 'review' ELSE {uncapped} END"  # D10: every would-be contact is capped by operator_unverified
+    return (f"CASE WHEN {exclude} THEN 'exclude' WHEN contact_score >= {contact} THEN 'review' "
+            f"WHEN review_rank <= {review_n} AND contact_score >= {review} THEN 'review' ELSE 'skip' END")
 
 
 def contact_expr_sql(fit_col):
@@ -110,7 +117,7 @@ def contact_expr_sql(fit_col):
     return f"({W_F_PCT} * {fit_col} + {100 - W_F_PCT} * urgency_score + 50) // 100"
 
 
-def build_scored(con, input_path, contact, review):
+def build_scored(con, input_path, contact, review, review_n=REVIEW_N):
     """Create table scored: the signals plus point columns, the three scores, band_uncapped, cap_reasons and band (D9.6 items 2 to 5)."""
     con.execute(f"CREATE OR REPLACE TABLE signals AS SELECT * FROM read_parquet('{quote_path(input_path)}')")
     cvss = cvss_points_sql()
@@ -131,7 +138,7 @@ def build_scored(con, input_path, contact, review):
             (CASE WHEN cert_expired_or_soon THEN {PTS_CERT} ELSE 0 END)::INTEGER AS p_cert,
             (CASE WHEN legacy_tls THEN {PTS_LEGACY_TLS} ELSE 0 END)::INTEGER AS p_legacy,
             (footprint_band * {PTS_FOOTPRINT_PER_BAND})::INTEGER AS p_footprint,
-            (CASE WHEN coalesce(in_territory, false) THEN {PTS_TERRITORY} ELSE 0 END)::INTEGER AS p_territory,
+            (CASE WHEN coalesce(in_territory, false) THEN {IN_TERRITORY_POINTS} ELSE 0 END)::INTEGER AS p_territory,
             (CASE WHEN sensitive_stack THEN {PTS_SENSITIVE} ELSE 0 END)::INTEGER AS p_sensitive,
             (CASE WHEN operator_name_shape THEN {PENALTY_OPERATOR} ELSE 0 END)::INTEGER AS p_penalty
         FROM signals
@@ -161,7 +168,16 @@ def build_scored(con, input_path, contact, review):
         FROM scored
         """
     )
-    con.execute(f"CREATE OR REPLACE TABLE scored AS SELECT *, ({band_sql(contact, review)}) AS band FROM scored")
+    # D11.2: rank over non-excluded accounts in the D9.6 item 8 total order (account_id is unique, so the order is total); excluded accounts get a null rank.
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE scored AS
+        SELECT s.*, r.review_rank FROM scored s LEFT JOIN (
+            SELECT company_id, (row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC, host_count DESC, company_id))::INTEGER AS review_rank
+            FROM scored WHERE NOT (noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})) r USING (company_id)
+        """
+    )
+    con.execute(f"CREATE OR REPLACE TABLE scored AS SELECT *, ({band_sql(contact, review, review_n)}) AS band FROM scored")
 
 
 def plural_hosts(count):
@@ -181,9 +197,9 @@ def signal_candidates(row):
     out = []
     if row["p_vuln"] > 0:
         if row["vuln_signal"] == "kev_exposed":
-            phrase = f"{plural_hosts(row['kev_host_count'])} with a vulnerability on the CISA known-exploited list"
+            phrase = f"{plural_hosts(row['kev_host_count'])} {KEV_PHRASE}"
         else:
-            phrase = f"worst vulnerability scores CVSS {row['max_cvss']:.1f}"
+            phrase = f"{CVSS_PHRASE} {row['max_cvss']:.1f}"
         out.append((row["p_vuln"], 0, 0, row["vuln_signal"], phrase))
     if row["p_expo"] > 0:
         sig = row["expo_signal"]
@@ -210,15 +226,17 @@ def cap_clause(cap_reasons):
 
 
 def build_why(row):
-    """Return (top_signals, why) for one account: exclude text, no-signal text, or the top two signals plus one cap clause and the D10 operator clause."""
+    """Return (top_signals, why) for one account: exclude text, no-signal text, or the top two signals plus one cap or operator clause, the skip clause, and the D10 clause."""
     if row["band"] == "exclude":
         return None, f"Mostly honeypot or attacker-infrastructure hosts ({row['noise_host_count']} of {row['host_count'] + row['noise_host_count']})."
     clause = cap_clause(row["cap_reasons"])
+    if not clause and row["band"] == "review" and row["operator_name_shape"]:
+        clause = OPERATOR_CLAUSE  # D11.3: a review row reached by the top-N rule or the floor still shows the name flag
     if row["urgency_score"] == 0:
         return None, " ".join(x for x in (f"No exposure signal found in the scan ({plural_hosts(row['host_count'])} seen).", clause) if x)  # never a would-be contact
     ranked = sorted(signal_candidates(row), key=lambda c: (-c[0], c[1], c[2]))
     unverified = UNVERIFIED_CLAUSE if CAP_UNVERIFIED in (row["cap_reasons"] or "").split(",") else ""
-    tail = clause or ("Exposure is limited." if row["band"] == "skip" else "")
+    tail = clause or (SKIP_CLAUSE if row["band"] == "skip" else "")
     for keep in (2, 1):
         top = ranked[:keep]
         body = "; ".join(c[4] for c in top)
@@ -267,10 +285,11 @@ def write_output(con, output_path):
     con.execute(f"COPY accounts TO '{quote_path(output_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 
 
-def run_stage(con, input_path, output_path, contact=THRESHOLD_CONTACT, review=THRESHOLD_REVIEW):
+def run_stage(con, input_path, output_path, contact=THRESHOLD_CONTACT, review=THRESHOLD_REVIEW, review_n=REVIEW_N):
     """Score, band, explain and write one signals file; return the row counts."""
     assert review < contact, "review threshold must be below the contact threshold"
-    build_scored(con, input_path, contact, review)
+    assert review_n >= 0, "review_n must not be negative"
+    build_scored(con, input_path, contact, review, review_n)
     build_accounts(con)
     write_output(con, output_path)
     return {"signals_rows": con.execute("SELECT count(*) FROM signals").fetchone()[0],
@@ -307,9 +326,9 @@ def pct(part, whole):
     return f"{100 * part / whole:.2f}%" if whole else "n/a"
 
 
-def band_counts(con, contact, review):
+def band_counts(con, contact, review, review_n):
     """Return {band: count} at the given thresholds, computed from table scored with caps applied."""
-    rows = con.execute(f"SELECT {band_sql(contact, review)} AS b, count(*) FROM scored GROUP BY 1").fetchall()
+    rows = con.execute(f"SELECT {band_sql(contact, review, review_n)} AS b, count(*) FROM scored GROUP BY 1").fetchall()
     counts = dict(rows)
     return {b: counts.get(b, 0) for b in BANDS}
 
@@ -333,43 +352,75 @@ def section_distributions(con, rep, output_path, total):
             f"fit {nonzero[2]:,} ({pct(nonzero[2], total)}).")
 
 
-def section_bands(con, rep, contact, review, total):
-    """Report band counts at the run thresholds, the threshold previews against the senior's run, and the cap effects and review composition."""
-    rep.add(f"\n## 3. Bands at contact >= {contact}, review >= {review} (PROVISIONAL)\n")
+def section_bands(con, rep, contact, review, review_n, total):
+    """Report band counts at the run settings, the D11 comparison, the review cut and tie, threshold previews, cap effects, review composition and the skip exposure."""
+    rep.add(f"\n## 3. Bands at contact >= {contact}, review = would-be contacts plus the top {review_n} with contact_score >= {review} (PROVISIONAL)\n")
     counts = dict(con.execute("SELECT band, count(*) FROM accounts GROUP BY 1").fetchall())
     rep.table(("band", "accounts", "share"), [(b, f"{counts.get(b, 0):,}", pct(counts.get(b, 0), total)) for b in BANDS])
-    rep.add(f"\n### Previous run and the senior's D10 expectation (at {contact} / {review})\n")
-    rows = [(b, f"{PREVIOUS_RUN[b]:,}", D10_EXPECTED[b], f"{counts.get(b, 0):,}") for b in BANDS]
-    rep.table(("band", "previous run (pre-D10)", "senior's D10 expectation", "this run"), rows)
-    rep.add("\n### Threshold previews (every would-be contact is held in review by operator_unverified)\n")
+    rep.add(f"\n### Previous run (D10, threshold-only review) and the senior's D11 expectation (X = {contact}, Y = {review}, N = {review_n})\n")
+    rows = [(b, f"{PREVIOUS_RUN[b]:,}", D11_EXPECTED[b], f"{counts.get(b, 0):,}") for b in BANDS]
+    rep.table(("band", "previous run (D10)", "senior's D11 expectation", "this run"), rows)
+    section_cut(con, rep, contact, review, review_n)
+    rep.add("\n### Threshold previews (every would-be contact is held in review by operator_unverified; the top-N rule applies at each pair)\n")
     rows = []
     for pair in COMPARE_PAIRS:
-        mine = band_counts(con, *pair)
+        mine = band_counts(con, pair[0], pair[1], review_n)
         would = con.execute(f"SELECT count(*) FROM scored WHERE contact_score >= {pair[0]} AND NOT (noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE})").fetchone()[0]
         rows.append((f"{pair[0]} / {pair[1]}", " / ".join(f"{mine[b]:,}" for b in BANDS), f"{would:,}"))
     rep.table(("contact / review thresholds", "this stage: contact / review / skip / exclude", "would-be contacts (now in review)"), rows)
     rep.add(f"\n### Cap effects (at {contact} / {review})\n")
     would = con.execute("SELECT count(*) FROM scored WHERE band_uncapped = 'contact'").fetchone()[0]
     moved = con.execute("SELECT count(*) FROM accounts WHERE cap_reasons IS NOT NULL").fetchone()[0]
-    rep.add(f"Would-be contacts (band_uncapped = contact, not excluded): {would:,}; moved to review by a cap: {moved:,}; remain contact: {would - moved:,} (D10: none; only adjudication may set final_band = contact).")
+    rep.add(f"Would-be contacts (band_uncapped = contact, not excluded): {would:,} (D11.5 expected about {D11_EXPECTED_WOULD_BE}); moved to review by a cap: {moved:,}; remain contact: {would - moved:,} (D10: none; only adjudication may set final_band = contact).\n")
     rows = [(reason, con.execute(f"SELECT count(*) FROM accounts WHERE list_contains(string_split(coalesce(cap_reasons, ''), ','), '{reason}')").fetchone()[0])
             for reason in [r for r, _ in CAP_CLAUSES] + [CAP_UNVERIFIED]]
     only = dict(con.execute("SELECT cap_reasons, count(*) FROM accounts WHERE cap_reasons IS NOT NULL GROUP BY 1 ORDER BY 2 DESC").fetchall())
     rep.table(("cap reason (accounts carrying it; some carry two or three)", "accounts"), rows)
     rep.add("\nBy exact reason set: " + "; ".join(f"{k} = {v}" for k, v in only.items()) + ".")
-    rep.add(f"\n### Review band composition (at {contact} / {review})\n")
-    rv, capped, thr, single, op, low, us = con.execute(
+    rep.add(f"\n### Review band composition (at {contact} / {review} / N = {review_n})\n")
+    rv, capped, thr, single, op, op_nocap, low, us = con.execute(
         "SELECT count(*), count(*) FILTER (WHERE a.cap_reasons IS NOT NULL), count(*) FILTER (WHERE a.cap_reasons IS NULL), "
         "count(*) FILTER (WHERE s.is_singleton), count(*) FILTER (WHERE s.operator_name_shape), "
+        "count(*) FILTER (WHERE s.operator_name_shape AND a.cap_reasons IS NULL), "
         "count(*) FILTER (WHERE s.identity_confidence = 'low'), count(*) FILTER (WHERE s.country_code = 'US') "
         "FROM accounts a JOIN scored s ON s.company_id = a.account_id WHERE a.band = 'review'").fetchone()
-    rep.table(("review accounts", "value", "D9.8 pre-D10 (40 / 20)"), [
-        ("total", f"{rv:,}", "593"), ("reached by a cap (was contact)", f"{capped:,}", "37"), ("reached by threshold alone", f"{thr:,}", "556"),
-        ("singletons", f"{single:,}", "325"), ("operator-shaped (T1 or T2)", f"{op:,}", "187"), ("low identity confidence", f"{low:,}", "21"),
-        ("country US", f"{us:,}", "125")])
+    rep.table(("review accounts", "value"), [
+        ("total", f"{rv:,}"), ("reached by a cap (was contact)", f"{capped:,}"), ("reached by the top-N rule alone", f"{thr:,}"),
+        ("singletons", f"{single:,}"), ("operator-shaped (T1 or T2)", f"{op:,}"), ("operator-shaped among the top-N-only rows (get the D11.3 clause)", f"{op_nocap:,}"),
+        ("low identity confidence", f"{low:,}"), ("country US", f"{us:,}")])
     excl = con.execute("SELECT company_name, host_count, noise_host_count, noise_host_share FROM scored WHERE band = 'exclude'").fetchall()
     rep.add(f"\nExclude band (D9.3 rule, noise_host_count >= {NOISE_MIN_HOSTS} AND noise_host_share >= {NOISE_MIN_SHARE}): {len(excl)} account(s): "
             + "; ".join(f"{n} ({h} hosts, {k} noise rows, share {s:.2f})" for n, h, k, s in excl) + ".")
+    section_skip_exposure(con, rep, review)
+
+
+def section_cut(con, rep, contact, review, review_n):
+    """Report where the top-N cut falls: the score at the cut, the tie size there and how many of the tie are kept (D11.2)."""
+    rep.add(f"\n### Review cut (N = {review_n}, floor {review})\n")
+    would = con.execute(f"SELECT count(*) FROM scored WHERE band <> 'exclude' AND contact_score >= {contact}").fetchone()[0]
+    if would >= review_n:
+        rep.add(f"Would-be contacts ({would:,}) reach or exceed N = {review_n:,}: the band is the would-be contacts only; no top-N cut.")
+        return
+    cut = con.execute(f"SELECT contact_score FROM scored WHERE review_rank = {review_n}").fetchone()
+    if cut is None or cut[0] < review:
+        rep.add(f"The floor ({review}) binds before N: fewer than {review_n:,} non-excluded accounts score at {review} or more; no tie at the cut.")
+        return
+    score = cut[0]
+    tied, kept = con.execute(f"SELECT count(*), count(*) FILTER (WHERE review_rank <= {review_n}) FROM scored WHERE contact_score = {score} AND review_rank IS NOT NULL").fetchone()
+    rep.add(f"The cut falls at contact_score {score}: {tied:,} non-excluded accounts are tied at {score}, {kept:,} are kept in review and {tied - kept:,} go to skip "
+            f"(tie broken by urgency_score, host_count, account_id; D11 measured score {D11_EXPECTED_TIE[0]} with a tie of {D11_EXPECTED_TIE[1]} before the territory change). "
+            f"Accounts above the cut score: {review_n - kept:,}.")
+
+
+def section_skip_exposure(con, rep, review=THRESHOLD_REVIEW):
+    """Report skip accounts with urgency above 0 and, split at the floor, those with a non-SSH admin or database port or CVSS 7 or more (D11.3 measured 42 + 32 = 74 below the floor)."""
+    rows = con.execute(
+        "SELECT a.contact_score < ?, count(*), count(*) FILTER (WHERE s.risky_non_ssh_exposed), count(*) FILTER (WHERE s.max_cvss_band >= 2), "
+        "count(*) FILTER (WHERE s.risky_non_ssh_exposed AND s.max_cvss_band >= 2), count(*) FILTER (WHERE s.risky_non_ssh_exposed OR s.max_cvss_band >= 2) "
+        "FROM accounts a JOIN scored s ON s.company_id = a.account_id WHERE a.band = 'skip' AND a.urgency_score > 0 GROUP BY 1 ORDER BY 1 DESC", [review]).fetchall()
+    rep.add(f"\nSkip accounts with urgency_score above 0, split at the floor Y = {review} (all read \"{SKIP_CLAUSE}\" and none is routed to review, D11.3):\n")
+    rep.table(("where", "skip accounts urgency > 0", "non-SSH admin or database port", "CVSS 7.0 or more", "both", "union"),
+              [(f"contact_score below {review} (D11.3 measured 659, 42, 32, 0, 74)" if below else f"contact_score {review} or more, beyond the top-N cut", *r[1:]) for r in rows for below in [r[0]]])
 
 
 def section_union_effect(con, rep, n):
@@ -436,18 +487,18 @@ def section_output(con, rep, output_path, signals_rows):
         rep.add(f"- [{i}] " + ", ".join(f"{k}={str(v)[:70]}" for k, v in zip(names, row)))
 
 
-def print_report(con, run, output_path, report_path, contact, review):
+def print_report(con, run, output_path, report_path, contact, review, review_n=REVIEW_N):
     """Print and save the stage report; assertions fail the run when the arithmetic breaks."""
     rep = Report()
     total = run["accounts_rows"]
     rep.add(f"# Accounts stage report ({datetime.date.today().isoformat()})\n")
-    rep.add("**PROVISIONAL CONSTANTS: not calibrated, not owner-approved.** Points, FLOOR, thresholds and the T1-or-T2 operator penalty (D10, T2 gate pending) are the D9.7 starting point, "
+    rep.add("**PROVISIONAL CONSTANTS: not calibrated, not owner-approved.** Points, FLOOR, thresholds, N and the T1-or-T2 operator penalty (D10, D11 provisional) are the D9.7 starting point, "
             "used so the stage can be exercised; read no band here as a decision. Contact form: "
-            f"({CONTACT_FORM}), FLOOR {FLOOR_PCT / 100:.2f}, X = {contact}, Y = {review}.\n")
+            f"({CONTACT_FORM}), FLOOR {FLOOR_PCT / 100:.2f}, X = {contact}, Y = {review} (floor of the review band), N = {review_n}, territory points {IN_TERRITORY_POINTS} (neutral, D11.5).\n")
     rep.add("## 1. Row counts\n")
     rep.add(f"signals {run['signals_rows']:,} = accounts {total:,} (asserted; account_id unique, equal to company_id). Output: {Path(output_path).as_posix()}.")
     section_distributions(con, rep, output_path, total)
-    section_bands(con, rep, contact, review, total)
+    section_bands(con, rep, contact, review, review_n, total)
     section_union_effect(con, rep, TOP_N)
     section_top(con, rep, TOP_N)
     section_output(con, rep, output_path, run["signals_rows"])
@@ -462,14 +513,15 @@ def main():
     parser.add_argument("--input", help="override the signals parquet path")
     parser.add_argument("--output", help="override the output parquet path")
     parser.add_argument("--contact", type=int, default=THRESHOLD_CONTACT, help="contact threshold X (provisional default)")
-    parser.add_argument("--review", type=int, default=THRESHOLD_REVIEW, help="review threshold Y (provisional default)")
+    parser.add_argument("--review", type=int, default=THRESHOLD_REVIEW, help="review threshold Y, the floor of the top-N review band (provisional default)")
+    parser.add_argument("--review-n", type=int, default=REVIEW_N, help="N: total accounts in the review band, would-be contacts always kept (provisional default)")
     args = parser.parse_args()
     input_path = args.input or (FULL_INPUT_PATH if args.full else INPUT_PATH)
     output_path = args.output or (FULL_OUTPUT_PATH if args.full else OUTPUT_PATH)
     report_name = f"accounts_stage_{'full_' if args.full else ''}{datetime.date.today().isoformat()}.md"
     con = duckdb.connect()
-    run = run_stage(con, input_path, output_path, args.contact, args.review)
-    print_report(con, run, output_path, REPORT_DIR / report_name, args.contact, args.review)
+    run = run_stage(con, input_path, output_path, args.contact, args.review, args.review_n)
+    print_report(con, run, output_path, REPORT_DIR / report_name, args.contact, args.review, args.review_n)
 
 
 if __name__ == "__main__":

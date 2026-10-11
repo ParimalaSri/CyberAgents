@@ -30,6 +30,7 @@ DEFAULTS = {
     "risky_service_exposed": False, "risky_non_ssh_exposed": False, "risky_service_host_count": 0, "risky_ports": [], "exposed_and_outdated": False,
 }
 COLUMNS = tuple(DEFAULTS)
+LAST_CON = []  # the DuckDB connection of the latest run_scores call, so a test can read the scored table and call report sections
 
 
 def sig(company_id, **over):
@@ -55,6 +56,7 @@ def run_scores(rows, **kwargs):
         con.execute(f"COPY s TO '{src.as_posix()}' (FORMAT PARQUET)")
         out = Path(tmp, "out", "accounts.parquet")
         counts = STAGE.run_stage(con, src, out, **kwargs)
+        LAST_CON[:] = [con]
         cur = con.execute(f"SELECT * FROM read_parquet('{out.as_posix()}')")
         names = [d[0] for d in cur.description]
         accounts = [dict(zip(names, r)) for r in cur.fetchall()]
@@ -105,29 +107,39 @@ class PointRuleTests(unittest.TestCase):
         self.assertEqual(row["urgency_score"], 100)
 
     def test_fit_rules(self):
-        """Territory 35, footprint band x 15, sensitive 20, null territory counts 0."""
+        """D11.5: territory points are 0 (neutral), footprint band x 15, sensitive 20; the maximum fit is 65 until the territory list exists."""
+        self.assertEqual(STAGE.IN_TERRITORY_POINTS, 0)
         self.assertEqual(score_one()["fit_score"], 0)
-        self.assertEqual(score_one(in_territory=True)["fit_score"], 35)
+        self.assertEqual(score_one(in_territory=True)["fit_score"], 0)
         self.assertEqual(score_one(in_territory=None)["fit_score"], 0)
         self.assertEqual([score_one(footprint_band=b)["fit_score"] for b in range(4)], [0, 15, 30, 45])
         self.assertEqual(score_one(sensitive_stack=True)["fit_score"], 20)
-        self.assertEqual(score_one(in_territory=True, footprint_band=3, sensitive_stack=True)["fit_score"], 100)
+        self.assertEqual(score_one(in_territory=True, footprint_band=3, sensitive_stack=True)["fit_score"], 65)
+
+    def test_territory_is_neutral_for_scores_and_why(self):
+        """In and out of territory give the same fit, contact, top_signals and why, and the why never names a location as a reason."""
+        over = dict(kev_exposed=True, kev_host_count=2, footprint_band=1, distinct_host_ips=3, country_code="US")
+        inside, outside = score_one(in_territory=True, **over), score_one(in_territory=False, **over)
+        for key in ("fit_score", "urgency_score", "contact_score", "top_signals", "why", "band"):
+            self.assertEqual(inside[key], outside[key], key)
+        self.assertNotIn("located in", inside["why"])
+        self.assertNotIn("in_territory", inside["top_signals"])
 
     def test_operator_penalty_union(self):
         """D10: the fit penalty of 30 applies to the T1-or-T2 union; a T2-only name loses fit points; one penalty when both fire; clipped at 0."""
-        self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t1=True)["fit_score"], 50)
-        self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t2=True)["fit_score"], 50)
-        self.assertEqual(score_one(in_territory=True, footprint_band=3, operator_shape_t1=True, operator_shape_t2=True)["fit_score"], 50)
-        self.assertEqual(score_one(in_territory=True, footprint_band=3)["fit_score"], 80)
+        self.assertEqual(score_one(footprint_band=3, sensitive_stack=True, operator_shape_t1=True)["fit_score"], 35)
+        self.assertEqual(score_one(footprint_band=3, sensitive_stack=True, operator_shape_t2=True)["fit_score"], 35)
+        self.assertEqual(score_one(footprint_band=3, sensitive_stack=True, operator_shape_t1=True, operator_shape_t2=True)["fit_score"], 35)
+        self.assertEqual(score_one(footprint_band=3, sensitive_stack=True)["fit_score"], 65)
         self.assertEqual(score_one(footprint_band=1, operator_shape_t2=True)["fit_score"], 0)
         self.assertEqual(score_one(footprint_band=1, operator_shape_t1=True)["fit_score"], 0)
 
     def test_union_penalty_lowers_contact_score(self):
-        """A T2-only operator scores lower contact than the same account without the flag (urgency 100: fit 80 gives 90, fit 50 gives 75)."""
+        """A T2-only operator scores lower contact than the same account without the flag (urgency 100: fit 45 gives 73, fit 15 gives 58)."""
         full = dict(kev_exposed=True, risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, eol_stack=True,
                     cert_expired_or_soon=True, legacy_tls=True, in_territory=True, footprint_band=3)
-        self.assertEqual(score_one(**full)["contact_score"], 90)
-        self.assertEqual(score_one(operator_shape_t2=True, **full)["contact_score"], 75)
+        self.assertEqual(score_one(**full)["contact_score"], 73)
+        self.assertEqual(score_one(operator_shape_t2=True, **full)["contact_score"], 58)
 
 
 class ContactScoreTests(unittest.TestCase):
@@ -135,8 +147,8 @@ class ContactScoreTests(unittest.TestCase):
 
     def test_formula_and_rounding(self):
         """contact = round(urgency * (0.5 + 0.5 * fit / 100)), half rounded up, exact in integers."""
-        row = score_one(kev_exposed=True, in_territory=True)  # urgency 50, fit 35 -> 50 * 0.675 = 33.75
-        self.assertEqual((row["urgency_score"], row["fit_score"], row["contact_score"]), (50, 35, 34))
+        row = score_one(kev_exposed=True, footprint_band=1)  # urgency 50, fit 15 -> 50 * 0.575 = 28.75
+        self.assertEqual((row["urgency_score"], row["fit_score"], row["contact_score"]), (50, 15, 29))
         row = score_one(max_cvss_band=1, footprint_band=1)  # urgency 10, fit 15 -> 10 * 0.575 = 5.75
         self.assertEqual(row["contact_score"], 6)
         row = score_one(eol_stack=True, cert_expired_or_soon=True, footprint_band=1, in_territory=False)  # urgency 15, fit 15 -> 15 * 0.575 = 8.625
@@ -145,14 +157,14 @@ class ContactScoreTests(unittest.TestCase):
         self.assertEqual(row["contact_score"], 6)
         row = score_one(max_cvss_band=2, footprint_band=0, sensitive_stack=True, operator_shape_t1=False, in_territory=False)  # 25 * 0.6 = 15.0
         self.assertEqual(row["contact_score"], 15)
-        row = score_one(max_cvss_band=1, in_territory=True, sensitive_stack=True, footprint_band=0)  # fit 55: 10 * 0.775 = 7.75
-        self.assertEqual(row["contact_score"], 8)
+        row = score_one(max_cvss_band=1, sensitive_stack=True, footprint_band=1)  # fit 35: 10 * 0.675 = 6.75
+        self.assertEqual(row["contact_score"], 7)
 
     def test_half_goes_up(self):
         """Values at and near .5 round half up (25 * 0.5 = 12.5 gives 13)."""
         row = score_one(risky_service_exposed=True, sensitive_stack=True)  # urgency 5, fit 20 -> 5 * 0.6 = 3.0
         self.assertEqual(row["contact_score"], 3)
-        row = score_one(legacy_tls=True, in_territory=True, sensitive_stack=True, footprint_band=0)  # urgency 5, fit 55 -> 5 * 0.775 = 3.875
+        row = score_one(legacy_tls=True, sensitive_stack=True, footprint_band=3)  # urgency 5, fit 65 -> 5 * 0.825 = 4.125
         self.assertEqual(row["contact_score"], 4)
         row = score_one(eol_stack=True, footprint_band=1)  # urgency 10, fit 15 -> 5.75
         self.assertEqual(row["contact_score"], 6)
@@ -160,11 +172,11 @@ class ContactScoreTests(unittest.TestCase):
         self.assertEqual(row["contact_score"], 13)
 
     def test_invariant_at_extremes(self):
-        """FLOOR * urgency <= contact <= urgency at fit 0 and 100 and urgency 0 and 100."""
+        """FLOOR * urgency <= contact <= urgency at fit 0 and 65 (the D11 maximum) and urgency 0 and 100."""
         full = dict(kev_exposed=True, risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, eol_stack=True,
                     cert_expired_or_soon=True, legacy_tls=True)
         rich = dict(in_territory=True, footprint_band=3, sensitive_stack=True)
-        cases = {"u100 f100": (full, rich, 100, 100, 100), "u100 f0": (full, {}, 100, 0, 50), "u0 f100": ({}, rich, 0, 100, 0), "u0 f0": ({}, {}, 0, 0, 0)}
+        cases = {"u100 f65": (full, rich, 100, 65, 83), "u100 f0": (full, {}, 100, 0, 50), "u0 f65": ({}, rich, 0, 65, 0), "u0 f0": ({}, {}, 0, 0, 0)}
         for label, (u_over, f_over, urgency, fit, contact) in cases.items():
             row = score_one(**u_over, **f_over)
             self.assertEqual((row["urgency_score"], row["fit_score"], row["contact_score"]), (urgency, fit, contact), label)
@@ -203,18 +215,21 @@ class BandTests(unittest.TestCase):
         self.assertEqual(accounts["a"]["band"], "skip")
 
     def test_threshold_options_default_and_override(self):
-        """The command-line defaults are the provisional X = 40, Y = 20 and the parser accepts overrides."""
-        self.assertEqual((STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW), (40, 20))
+        """The command-line defaults are the provisional X = 40, Y = 20, N = 200 and the parser accepts overrides including --review-n."""
+        self.assertEqual((STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, STAGE.REVIEW_N), (40, 20, 200))
         import sys
         old = sys.argv
         try:
-            sys.argv = ["4_score.py", "--contact", "45", "--review", "25"]
             captured = {}
             original = (STAGE.run_stage, STAGE.print_report)
-            STAGE.run_stage = lambda con, i, o, c, r: captured.update(c=c, r=r) or {"signals_rows": 0, "accounts_rows": 0}
+            STAGE.run_stage = lambda con, i, o, c, r, n: captured.update(c=c, r=r, n=n) or {"signals_rows": 0, "accounts_rows": 0}
             STAGE.print_report = lambda *a, **k: None
+            sys.argv = ["4_score.py", "--contact", "45", "--review", "25", "--review-n", "77"]
             STAGE.main()
-            self.assertEqual((captured["c"], captured["r"]), (45, 25))
+            self.assertEqual((captured["c"], captured["r"], captured["n"]), (45, 25, 77))
+            sys.argv = ["4_score.py"]
+            STAGE.main()
+            self.assertEqual((captured["c"], captured["r"], captured["n"]), (40, 20, 200))
         finally:
             STAGE.run_stage, STAGE.print_report = original
             sys.argv = old
@@ -302,17 +317,118 @@ class BandTests(unittest.TestCase):
         self.assertEqual((a["band"], a["band_uncapped"], a["cap_reasons"], a["final_band"]), ("exclude", "exclude", None, "exclude"))
 
 
+class ReviewBandTests(unittest.TestCase):
+    """D11.2: review is every would-be contact plus the best remaining accounts by the stage order up to N, with the floor Y."""
+
+    @staticmethod
+    def strong(**over):
+        """Return a company with urgency 100 and fit 0 (contact 50), a would-be contact."""
+        return dict(kev_exposed=True, risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, eol_stack=True,
+                    cert_expired_or_soon=True, legacy_tls=True, **over)
+
+    @staticmethod
+    def graded(prefix, count):
+        """Return count companies mixing KEV and CVSS band 3 with footprint bands 3 to 0 to give contact scores 36, 33, 29, 25, 29, 26, 23, 20."""
+        specs = [dict(kev_exposed=True, footprint_band=3), dict(kev_exposed=True, footprint_band=2), dict(kev_exposed=True, footprint_band=1),
+                 dict(kev_exposed=True, footprint_band=0), dict(max_cvss_band=3, footprint_band=3), dict(max_cvss_band=3, footprint_band=2),
+                 dict(max_cvss_band=3, footprint_band=1), dict(max_cvss_band=3, footprint_band=0)]  # contact 36, 33, 29, 25, 29, 26, 23, 20
+        return [sig(f"{prefix}{i}", **specs[i]) for i in range(count)]
+
+    def test_top_n_keeps_the_best_in_stage_order(self):
+        """With N = 3 and eight scored accounts, exactly the three best by contact_score are in review and the rest are skip."""
+        accounts, order, _, _ = run_scores(self.graded("g", 8), review_n=3)
+        review = [a for a in order if accounts[a]["band"] == "review"]
+        self.assertEqual(len(review), 3)
+        self.assertEqual(review, order[:3])  # the output sort is the stage order
+        self.assertEqual(sorted(accounts[a]["contact_score"] for a in review), [29, 33, 36])
+        for a in order[3:]:
+            self.assertEqual(accounts[a]["band"], "skip")
+            self.assertTrue(accounts[a]["why"].endswith("Below the review cut-off."), accounts[a]["why"])
+        self.assertTrue(all(accounts[a]["band_uncapped"] in ("review", "contact") for a in order))  # band_uncapped keeps its threshold meaning
+
+    def test_would_be_contacts_are_never_dropped(self):
+        """When the would-be contacts exceed N the band is exactly the would-be contacts, and no other account is in review."""
+        rows = [sig(f"w{i}", **self.strong()) for i in range(5)] + self.graded("g", 4)
+        for n in (0, 1, 3, 5):
+            accounts, _, _, _ = run_scores(rows, review_n=n)
+            review = {a for a, r in accounts.items() if r["band"] == "review"}
+            self.assertEqual(review, {f"w{i}" for i in range(5)}, n)
+            for a in review:
+                self.assertEqual((accounts[a]["band_uncapped"], accounts[a]["cap_reasons"]), ("contact", "operator_unverified"))
+
+    def test_n_larger_than_would_be_count_adds_the_best_others(self):
+        """With 2 would-be contacts and N = 5 the band is the 2 plus the 3 best others, with the floor applied last."""
+        rows = [sig(f"w{i}", **self.strong()) for i in range(2)] + self.graded("g", 8)
+        accounts, _, _, _ = run_scores(rows, review_n=5)
+        review = {a for a, r in accounts.items() if r["band"] == "review"}
+        self.assertEqual(len(review), 5)
+        self.assertTrue({"w0", "w1", "g0", "g1"} <= review)
+        self.assertEqual(sum(1 for a in review if a.startswith("g") and accounts[a]["contact_score"] >= 29), 3)
+        accounts, _, _, _ = run_scores(rows, review_n=100)
+        self.assertEqual(sum(1 for r in accounts.values() if r["band"] == "review"), 10)  # every contact_score is at or above 20
+
+    def test_floor_stops_a_large_n(self):
+        """The floor Y keeps low scores out of review however large N is: contact 20 is in at Y = 20 and out at Y = 21; 13 is out at Y = 20."""
+        rows = [sig("hi", max_cvss_band=3), sig("lo", max_cvss_band=2), sig("zero")]
+        accounts, _, _, _ = run_scores(rows, review_n=1000)
+        self.assertEqual([accounts[k]["band"] for k in ("hi", "lo", "zero")], ["review", "skip", "skip"])
+        accounts, _, _, _ = run_scores(rows, review_n=1000, review=21)
+        self.assertEqual(accounts["hi"]["band"], "skip")
+        self.assertEqual(accounts["hi"]["band_uncapped"], "skip")
+
+    def test_tie_break_urgency_then_host_count_then_id(self):
+        """At the cut equal contact_score is ordered by urgency desc, then host_count desc, then account_id asc (a total order)."""
+        urg = [sig("b_low_urgency", max_cvss_band=3, footprint_band=3, host_count=20), sig("a_high_urgency", kev_exposed=True, footprint_band=1, host_count=2)]
+        accounts, _, _, _ = run_scores(urg, review_n=1)
+        self.assertEqual(accounts["a_high_urgency"]["contact_score"], accounts["b_low_urgency"]["contact_score"])
+        self.assertEqual((accounts["a_high_urgency"]["band"], accounts["b_low_urgency"]["band"]), ("review", "skip"))
+        hosts = [sig("small", kev_exposed=True, footprint_band=1, host_count=5), sig("big", kev_exposed=True, footprint_band=1, host_count=9)]
+        accounts, _, _, _ = run_scores(hosts, review_n=1)
+        self.assertEqual((accounts["big"]["band"], accounts["small"]["band"]), ("review", "skip"))
+        ids = [sig("id2", kev_exposed=True, footprint_band=1), sig("id1", kev_exposed=True, footprint_band=1)]
+        for _ in range(2):  # a rerun is identical
+            accounts, _, _, _ = run_scores(ids, review_n=1)
+            self.assertEqual((accounts["id1"]["band"], accounts["id2"]["band"]), ("review", "skip"))
+
+    def test_excluded_accounts_never_take_a_slot(self):
+        """An excluded account is not ranked: with N = 1 the single review slot goes to the best non-excluded account."""
+        rows = [sig("ex", noise_host_count=3, noise_host_share=0.6, host_count=2, **self.strong(footprint_band=3)), sig("ok", max_cvss_band=3), sig("ok2", max_cvss_band=3, host_count=9)]
+        accounts, _, _, _ = run_scores(rows, review_n=1)
+        self.assertEqual(accounts["ex"]["band"], "exclude")
+        self.assertEqual(sorted(a for a, r in accounts.items() if r["band"] == "review"), ["ok2"])
+
+    def test_no_account_in_contact_and_final_band_follows_band(self):
+        """Whatever N is, no account is in contact and final_band equals band."""
+        for n in (0, 2, 200):
+            accounts, _, _, _ = run_scores([sig(f"w{i}", **self.strong()) for i in range(3)] + self.graded("g", 8), review_n=n)
+            for a in accounts.values():
+                self.assertNotEqual(a["band"], "contact")
+                self.assertEqual(a["final_band"], a["band"])
+
+    def test_cut_report_prints_score_and_tie_size(self):
+        """The cut section names the score at the cut and the tie size and how many tied accounts are kept."""
+        rows = [sig(f"t{i}", kev_exposed=True, footprint_band=1, host_count=2 + i) for i in range(4)] + [sig("top", **self.strong())]
+        run_scores(rows, review_n=3)  # would-be 1, N = 3: two of the four tied accounts (contact 29) are kept
+        rep = STAGE.Report()
+        STAGE.section_cut(LAST_CON[0], rep, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 3)
+        text = "\n".join(rep.lines)
+        self.assertIn("contact_score 29: 4 non-excluded accounts are tied at 29, 2 are kept in review and 2 go to skip", text)
+        rep = STAGE.Report()
+        STAGE.section_cut(LAST_CON[0], rep, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 1)
+        self.assertIn("the band is the would-be contacts only", "\n".join(rep.lines))
+
+
 class WhyTests(unittest.TestCase):
     """Pinned phrases, the length limit and no empty why."""
 
     def test_pinned_phrases(self):
         """Every signal phrase, each cap clause, the no-signal text and the exclude text are pinned."""
         cases = [
-            (dict(kev_exposed=True, kev_host_count=1), "1 host with a vulnerability on the CISA known-exploited list."),
-            (dict(kev_exposed=True, kev_host_count=3), "3 hosts with a vulnerability on the CISA known-exploited list."),
-            (dict(max_cvss_band=3, max_cvss=9.8), "Worst vulnerability scores CVSS 9.8."),
-            (dict(max_cvss_band=2, max_cvss=7.5), "Worst vulnerability scores CVSS 7.5."),
-            (dict(max_cvss_band=1, max_cvss=4.3), "Worst vulnerability scores CVSS 4.3."),
+            (dict(kev_exposed=True, kev_host_count=1), "1 host running software whose version matches the CISA known-exploited list."),
+            (dict(kev_exposed=True, kev_host_count=3), "3 hosts running software whose version matches the CISA known-exploited list."),
+            (dict(max_cvss_band=3, max_cvss=9.8), "Worst version-matched vulnerability scores CVSS 9.8."),
+            (dict(max_cvss_band=2, max_cvss=7.5), "Worst version-matched vulnerability scores CVSS 7.5."),
+            (dict(max_cvss_band=1, max_cvss=4.3), "Worst version-matched vulnerability scores CVSS 4.3."),
             (dict(risky_service_exposed=True, risky_non_ssh_exposed=True, exposed_and_outdated=True, risky_ports=[22, 3389, 3306]),
              "An exposed admin or database service (SSH 22, RDP 3389) on outdated software."),
             (dict(risky_service_exposed=True, risky_non_ssh_exposed=True, risky_ports=[22, 3389]), "Remote-admin or database services exposed (RDP 3389)."),
@@ -325,12 +441,16 @@ class WhyTests(unittest.TestCase):
             why = score_one(**over)["why"]
             self.assertTrue(why.startswith(text), (over, why))
         top = score_one(max_cvss_band=1, max_cvss=3.0, distinct_host_ips=9, footprint_band=2, in_territory=True, country_code="US")
-        self.assertTrue(top["why"].startswith("Hosts located in US; 9 IPs in the footprint."), top["why"])
+        self.assertTrue(top["why"].startswith("9 IPs in the footprint; worst version-matched vulnerability scores CVSS 3.0."), top["why"])
         sens = score_one(max_cvss_band=1, max_cvss=3.0, sensitive_stack=True, in_territory=True, country_code="US")
-        self.assertTrue(sens["why"].startswith("Hosts located in US; database, medical or IoT systems in the stack."), sens["why"])
+        self.assertTrue(sens["why"].startswith("Database, medical or IoT systems in the stack; worst version-matched vulnerability scores CVSS 3.0."), sens["why"])
+        for why in (top["why"], sens["why"]):
+            self.assertNotIn("located in", why)
+            self.assertNotIn("is vulnerable", why)
+            self.assertNotIn("known-exploited host", why)
 
     def test_cap_clauses_and_skip_texts(self):
-        """Cap clauses, the no-signal sentence, the limited-exposure sentence for skip and the exclude sentence."""
+        """Cap clauses, the no-signal sentence, the D11.3 skip and operator sentences and the exclude sentence."""
         strong = dict(kev_exposed=True, kev_host_count=1, eol_stack=True, eol_host_count=1, risky_service_exposed=True, risky_non_ssh_exposed=True,
                       exposed_and_outdated=True, risky_ports=[3389], cert_expired_or_soon=True, cert_issue_host_count=1, legacy_tls=True, legacy_tls_host_count=1)
         clause = "Not yet checked that this is an end-user organisation, not a network operator."
@@ -346,9 +466,28 @@ class WhyTests(unittest.TestCase):
         self.assertNotIn(clause, score_one(max_cvss_band=3, max_cvss=9.8)["why"])  # a review account that is not a would-be contact
         self.assertEqual(score_one()["why"], "No exposure signal found in the scan (5 hosts seen).")
         self.assertEqual(score_one(host_count=1)["why"], "No exposure signal found in the scan (1 host seen).")
-        self.assertTrue(score_one(max_cvss_band=1, max_cvss=3.0)["why"].endswith("Exposure is limited."))
+        self.assertEqual(STAGE.SKIP_CLAUSE, "Below the review cut-off.")
+        skip = score_one(max_cvss_band=1, max_cvss=3.0)
+        self.assertEqual((skip["band"], skip["why"]), ("skip", "Worst version-matched vulnerability scores CVSS 3.0. Below the review cut-off."))
+        self.assertNotIn("Exposure is limited", skip["why"])
+        self.assertNotIn("Below the review cut-off.", score_one(max_cvss_band=3, max_cvss=9.8)["why"])  # a review row
         self.assertEqual(score_one(noise_host_count=3, noise_host_share=0.6, host_count=2)["why"],
                          "Mostly honeypot or attacker-infrastructure hosts (3 of 5).")
+
+    def test_operator_clause_on_review_rows_reached_by_top_n(self):
+        """A review row with operator_name_shape that is not a would-be contact ends with the operator clause; a non-operator review row and an operator skip row do not."""
+        op = score_one(max_cvss_band=3, max_cvss=9.8, operator_shape_t2=True)  # urgency 40, fit 0 -> contact 20, review by the floor and N
+        self.assertEqual((op["band"], op["band_uncapped"], op["cap_reasons"]), ("review", "review", None))
+        self.assertEqual(op["why"], "Worst version-matched vulnerability scores CVSS 9.8. Name looks like a network operator.")
+        plain = score_one(max_cvss_band=3, max_cvss=9.8)
+        self.assertEqual(plain["why"], "Worst version-matched vulnerability scores CVSS 9.8.")
+        skip_op = score_one(max_cvss_band=1, max_cvss=3.0, operator_shape_t1=True)
+        self.assertEqual(skip_op["band"], "skip")
+        self.assertNotIn("network operator", skip_op["why"])
+        self.assertEqual(skip_op["why"], "Worst version-matched vulnerability scores CVSS 3.0. Below the review cut-off.")
+        accounts, _, _, _ = run_scores([sig("o", max_cvss_band=3, max_cvss=9.8, operator_shape_t2=True)], review_n=0)
+        self.assertEqual(accounts["o"]["band"], "skip")  # N = 0 and not a would-be contact: skip, so no operator clause
+        self.assertTrue(accounts["o"]["why"].endswith("Below the review cut-off."))
 
     def test_top_two_by_points_with_tie_order(self):
         """Top two signals by points; ties go vulnerability, exposure, hygiene, fit; top_signals lists exactly the signals used."""
@@ -378,6 +517,8 @@ class WhyTests(unittest.TestCase):
             self.assertLessEqual(len(why.split()), 40, why)
             self.assertNotIn("_", why)
             self.assertNotIn("=", why)
+            self.assertNotIn("located in", why)
+            self.assertNotIn("Exposure is limited", why)
             for word in ("breach", "compromised", "hacked"):
                 self.assertNotIn(word, why.lower())
             if a["band_uncapped"] == "contact":
@@ -394,7 +535,7 @@ class OutputShapeTests(unittest.TestCase):
 
     def test_rows_equal_columns_types_order_nulls(self):
         """Row count equals the signals, the 17 columns have the D9.6 types, sort is contact desc, and decision and prompt_version are null."""
-        rows = [sig("a", max_cvss_band=3), sig("b", kev_exposed=True, in_territory=True), sig("c"), sig("d", noise_host_count=2, noise_host_share=0.5)]
+        rows = [sig("a", max_cvss_band=3), sig("b", kev_exposed=True, footprint_band=1), sig("c"), sig("d", noise_host_count=2, noise_host_share=0.5)]
         accounts, order, counts, types = run_scores(rows)
         self.assertEqual(counts, {"signals_rows": 4, "accounts_rows": 4})
         self.assertEqual(len(accounts), 4)
@@ -423,10 +564,10 @@ class OutputShapeTests(unittest.TestCase):
         original = STAGE.CONTACT_FORM
         try:
             STAGE.CONTACT_FORM = "a"
-            row = score_one(kev_exposed=True, in_territory=True)  # (30 * 35 + 70 * 50 + 50) // 100 = 46
-            self.assertEqual(row["contact_score"], 46)
-            row = score_one(in_territory=True)  # urgency 0, fit 35: form (a) lets fit alone lift the score (the reason (b) is recommended)
-            self.assertEqual(row["contact_score"], (STAGE.W_F_PCT * 35 + 50) // 100)
+            row = score_one(kev_exposed=True, footprint_band=1)  # (30 * 15 + 70 * 50 + 50) // 100 = 40
+            self.assertEqual(row["contact_score"], 40)
+            row = score_one(footprint_band=1)  # urgency 0, fit 15: form (a) lets fit alone lift the score (the reason (b) is recommended)
+            self.assertEqual(row["contact_score"], (STAGE.W_F_PCT * 15 + 50) // 100)
         finally:
             STAGE.CONTACT_FORM = original
 
