@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_PATH = ROOT / "data" / "sample" / "spread_100k.jsonl"  # dev input (D3 seek-spread sample)
 FULL_PATH = "D:/Cyber_DataSet/2026-09-14T10-00-00.json.zst"  # prod input, read in place, never modified
 OUTPUT_PATH = ROOT / "data" / "silver" / "hosts.parquet"
+FULL_OUTPUT_PATH = ROOT / "data" / "silver" / "hosts_full.parquet"  # prod output: a full run must never overwrite the sample file (2_companies --full reads this)
 REPORT_SCRIPT = ROOT / ".claude" / "skills" / "pipeline-stage-build" / "scripts" / "stage_report.py"
 MATCHER_PATH = ROOT / "scripts" / "denylist_match.py"
 
@@ -303,18 +304,24 @@ def print_report(con, counts, input_path, output_path, compressed):
         print(f"raw cert {field} values nulled (unparseable or outside {CERT_YEAR_MIN}..{CERT_YEAR_MAX}), before dedupe: {nulled:,}")
 
 
+def resolve_output(output, full):
+    """Return the output path: the explicit one if given, else the full-run file for --full and the sample file otherwise."""
+    return str(output or (FULL_OUTPUT_PATH if full else OUTPUT_PATH))
+
+
 def main():
     """Run the stage end to end on the sample (default) or the full compressed source (--full)."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--full", action="store_true", help="read the compressed full source in place (not for dev)")
     parser.add_argument("--input", help="override the input JSON lines path")
-    parser.add_argument("--output", default=str(OUTPUT_PATH), help="output parquet path")
+    parser.add_argument("--output", help="output parquet path (default: hosts.parquet, or hosts_full.parquet with --full)")
     args = parser.parse_args()
     input_path = args.input or (FULL_PATH if args.full else str(SAMPLE_PATH))
+    output_path = resolve_output(args.output, args.full)
     compressed = args.full or str(input_path).endswith(".zst")
     con = duckdb.connect()
-    counts = run_stage(con, input_path, args.output, compressed)
-    print_report(con, counts, input_path, args.output, compressed)
+    counts = run_stage(con, input_path, output_path, compressed)
+    print_report(con, counts, input_path, output_path, compressed)
 
 
 if __name__ == "__main__":

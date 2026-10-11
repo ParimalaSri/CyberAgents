@@ -247,6 +247,13 @@ class CleanStageTests(unittest.TestCase):
         self.assertEqual(rows[0]["max_cvss"], 10.0)
         self.assertTrue(rows[0]["has_kev"])
 
+    def test_full_default_output_is_separate(self):
+        """--full defaults to hosts_full.parquet, the sample default stays hosts.parquet, an explicit path wins."""
+        self.assertEqual(Path(STAGE.resolve_output(None, True)).name, "hosts_full.parquet")
+        self.assertEqual(Path(STAGE.resolve_output(None, False)).name, "hosts.parquet")
+        self.assertNotEqual(STAGE.resolve_output(None, True), STAGE.resolve_output(None, False))
+        self.assertEqual(STAGE.resolve_output("x/y.parquet", True), "x/y.parquet")
+
 
 if __name__ == "__main__":
     unittest.main()
