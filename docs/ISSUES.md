@@ -146,3 +146,27 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Root cause (hypothesis): the 21-window probe (9,239 rows) was a small, clustered sample; the port-sweep burst is in only 53 of 1,000 blocks.
 - Fix idea: update ARCHITECTURE.md section 10/15 expectations (owner or senior-data-engineer). Full-file run will give the true values.
 - Contract rule: none; resolved-share range check stays 5% to 20%.
+
+## PIPE-001 Certificate date sentinels are more common than RAW-007 recorded
+- Symptom: on the spread sample (100,000 rows) 23 `ssl.cert.expires` values and 26 `ssl.cert.issued` values fall outside 1990..2100 or do not parse. Expiry examples:
+  `40960101000000Z` (2), `99991231235959Z` (2), `30200822072305Z`, `77641212080202Z`, a dozen 2117 to 2297, and `19710101000129Z`, `19030107085804Z`. Issued:
+  almost all `1970010100000x` (epoch placeholders), plus `19750101000000Z`. RAW-007 listed only 3 expiry and 1 issued sentinels (head sample).
+- Root cause (hypothesis): devices with no clock write epoch or far-future placeholder dates.
+- Fix applied in `pipeline/1_clean.py`: `cert_expires` and `cert_issued` are nulled outside 1990..2100 (the spec rule); the count is printed in the stage report.
+  `cert_expired` (the raw boolean) is kept as delivered, so it can disagree with a nulled date. Decision open for the owner: whether a 1970 issue date should count as a
+  "self-signed device without clock" signal instead of being thrown away.
+- Contract rule: `cert_expires` and `cert_issued` between 1990 and 2100 or null (the hosts contract has the range for cert_expires; add cert_issued).
+
+## PIPE-002 Dedupe on (host_ip, port, transport) discards alternative hostnames
+- Symptom: 1,098 duplicate groups (3,340 rows, 2,242 removed) in the spread sample. Every group has distinct timestamps; 976 of 1,098 groups have different `hostnames`
+  arrays across the copies; 8 groups differ in `_shodan.module`.
+- Root cause (hypothesis, supported by the counts): the same endpoint is banner-scanned again with another hostname or SNI, so the copies are not exact duplicates.
+- Effect: keeping only the latest row loses hostnames and domains seen on the earlier copies (evidence for stage 2 only; no flag or score depends on it today).
+- Fix idea: if domain evidence turns out to matter (D4 rule 3b), aggregate hostnames across duplicates before dedupe. Not done: the spec says keep latest.
+- Contract rule: key unique after stage 1 (already in the plan).
+
+## PIPE-003 executemany fails on an empty parameter list
+- Symptom: first run of `1_clean.py` stopped with `executemany requires a non-empty list of parameter sets` when no IPv6 value matched a CIDR pattern.
+- Root cause: DuckDB rejects an empty list; the sample has no IPv6 CIDR hit.
+- Fix: helper `insert_rows` skips empty lists. Test coverage: the synthetic tests run with no IPv6 hits.
+- Contract rule: none (a crash, not a data defect).
