@@ -105,7 +105,14 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   telecomunicações 13/15, telecomunicazioni 2/5, telekommunikation 5/6, telekomunikasi 2/3, telco 0/1. Effect (spread sample): infrastructure 88.80% to
   89.45% (88,802 to 89,446 rows), surviving 11,198 to 10,554, surviving distinct orgs 5,112 to 4,838. The 32-row gap (profile 12,336 vs 12,368) is the 32
   survivors with null `ip_str` (IPv6) dropped by NULL logic in the profile query (strongly supported, not proven). Details: `outputs/denylist_orgonly_review.md`.
-  Still open: accent variants are separate spellings because `normalise()` does not fold accents; one-word compound brands (rostelecom, kazakhtelecom) not matched.
+  Still open: one-word compound brands (rostelecom, kazakhtelecom) not matched.
+- Update 2026-10-11, branch `feat/data-integrator/accent-folding` (proposed): `normalise()` now folds Latin accents (NFKD, marks dropped only on Latin bases;
+  CJK, Cyrillic and Arabic untouched, 0 empty results on the sample); all loaders and `matches_pattern()` use the same folded form; 59 test cases pass.
+  Accented keyword entries removed (merged into telefonica). Re-gate after merging: telefonica 23/24 (95.8%) ENABLED, telecom 47/50 ENABLED, telecomunicacoes merged
+  36/42 (85.7%) FAILED and DISABLED (it was enabled at 25/27); all other keyword row sets unchanged (telekom 91.4%, chinanet 90.0% stay). Spread sample: infrastructure
+  89,446 to 89,398 rows (89.40%), surviving 10,554 to 10,602 (10.60%), surviving distinct orgs 4,838 to 4,863; folding alone moves 24 rows to infrastructure.
+  Details: `outputs/denylist_accent_folding.md`. Still true: `check_contract.py` applies none of the prefix, pattern, keyword or normalisation rules (RAW-010); the
+  data-quality-engineer must import `scripts/denylist_match.py`. Quirk: "S.A." normalises to "s a" and is not dropped as a legal suffix.
 - What remains: (1) 18 candidates failed the gate in the first round and are not applied, including communications (78.0%), isp, idc, fiber,
   mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
   but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr

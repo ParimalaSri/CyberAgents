@@ -2,6 +2,7 @@
 import fnmatch
 import ipaddress
 import re
+import unicodedata
 from pathlib import Path
 
 CONTEXT_DIR = Path(__file__).resolve().parent.parent / "context"
@@ -12,11 +13,25 @@ LEGAL_SUFFIXES = {
 MIN_PREFIX_CHARS = 4
 
 
+def fold_accents(text):
+    """Strip combining accent marks that sit on Latin letters (NFKD); leave every other script unchanged."""
+    out = []
+    base_is_latin = False
+    for char in unicodedata.normalize("NFKD", text):
+        if unicodedata.combining(char) and base_is_latin:
+            continue
+        out.append(char)
+        if not unicodedata.combining(char):
+            base_is_latin = unicodedata.name(char, "").startswith("LATIN")
+    return unicodedata.normalize("NFC", "".join(out))
+
+
 def normalise(name):
-    """Lowercase, strip punctuation, collapse spaces, drop trailing legal-suffix words."""
+    """Fold Latin accents, lowercase, strip punctuation, collapse spaces, drop trailing legal-suffix words."""
     if name is None:
         return ""
-    text = re.sub(r"[^\w]+", " ", str(name).lower().replace("&", " and "), flags=re.UNICODE)
+    folded = fold_accents(str(name)).lower().replace("&", " and ")
+    text = re.sub(r"[^\w]+", " ", folded, flags=re.UNICODE)
     text = text.replace("_", " ")
     words = text.split()
     while len(words) > 1 and words[-1] in LEGAL_SUFFIXES:
@@ -32,7 +47,7 @@ def read_entries(path):
 
 def load_exact(path=None):
     """Return the set of normalised exact-match denylist names."""
-    return {normalise(e) for e in read_entries(path or CONTEXT_DIR / "denylist.txt")}
+    return {n for n in (normalise(e) for e in read_entries(path or CONTEXT_DIR / "denylist.txt")) if n}
 
 
 def load_prefixes(path=None):
@@ -83,7 +98,17 @@ def load_keywords(path=None):
 
 def load_cert_defaults(path=None):
     """Return the set of normalised default certificate organisation names."""
-    return {normalise(e) for e in read_entries(path or CONTEXT_DIR / "cert_default_names.txt")}
+    return {n for n in (normalise(e) for e in read_entries(path or CONTEXT_DIR / "cert_default_names.txt")) if n}
+
+
+def fold_pattern_text(text):
+    """Fold Latin accents and lowercase text while keeping the punctuation that CIDR and glob patterns need."""
+    return fold_accents(str(text).strip()).lower()
+
+
+def load_patterns(path=None):
+    """Return the CIDR and glob pattern entries, accent-folded and lowercased (punctuation kept)."""
+    return [fold_pattern_text(e) for e in read_entries(path or CONTEXT_DIR / "denylist_patterns.txt")]
 
 
 def matches_prefix(normalised, prefixes):
@@ -111,9 +136,10 @@ def matches_pattern(value, patterns):
     """Return True if value (a name or an IP address) matches a CIDR or glob pattern."""
     if value is None:
         return False
-    text = str(value).strip().lower()
+    text = fold_pattern_text(value)
     for pattern in patterns:
-        if text == pattern.lower():
+        pattern = fold_pattern_text(pattern)
+        if text == pattern:
             return True
         if "/" in pattern and re.match(r"^[0-9a-f:.]+/\d+$", pattern):
             try:
@@ -121,6 +147,6 @@ def matches_pattern(value, patterns):
                     return True
             except ValueError:
                 continue
-        elif fnmatch.fnmatchcase(text, pattern.lower()):
+        elif fnmatch.fnmatchcase(text, pattern):
             return True
     return False

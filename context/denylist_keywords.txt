@@ -24,18 +24,17 @@ cable
 fibre
 dedicated
 # ORG-ONLY entries (gate run on org text only, among rows surviving every other rule; figures in outputs/denylist_orgonly_review.md):
-# gate results (INFRA / reviewed): telecom 49/50, telekom 32/35, telecommunication 20/20, telefonica 20/21, telephone 20/20,
-# telecomunicacoes 25/27, telecoms 3/3, telkom 5/5, telcom 4/4, accented telefônica 1/1 and telefónica 3/3 (normalise() does not fold accents,
-# so these are separate spellings). Failed and not applied: telecomunicaciones 13/19, telecomunicações 13/15, telecomunicazioni 2/5,
-# telekommunikation 5/6, telekomunikasi 2/3, telco 0/1.
+# gate results (INFRA / reviewed): telecom 47/50 (re-run after folding), telekom 32/35,
+# telecommunication 20/20, telefonica 23/24 (merged with the accented telefonica spellings), telephone 20/20, telecoms 3/3, telkom 5/5, telcom 4/4.
+# normalise() now folds Latin accents (scripts/denylist_match.py), so "telefônica" and "telefónica" are the same keyword as "telefonica".
+# Folding also merged telecomunicacoes with telecomunicações: the merged keyword scored 36/42 = 85.7% and is NOT applied (it was enabled before
+# folding at 25/27 on the ASCII spelling only). Failed and not applied: telecomunicacoes (merged) 36/42, telecomunicaciones 13/19,
+# telecomunicazioni 2/5, telekommunikation 5/6, telekomunikasi 2/3, telco 0/1. Figures: outputs/denylist_accent_folding.md.
 org: telecom
 org: telekom
 org: telecommunication
 org: telefonica
 org: telephone
-org: telecomunicacoes
 org: telecoms
 org: telkom
 org: telcom
-org: telefônica
-org: telefónica

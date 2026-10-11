@@ -12,6 +12,57 @@ def check(condition, label):
         raise AssertionError(label)
 
 
+def accent_cases():
+    """Return accent-folding assertions: Latin accents fold, other scripts survive, lists share the folded form."""
+    norm = dm.normalise
+    out = [
+        norm("TELEFÔNICA BRASIL") == norm("Telefónica Brasil") == norm("telefonica brasil") == "telefonica brasil",
+        norm("São Paulo") == "sao paulo",
+        norm("Ação Ltda") == "acao ltda",
+        norm("Müller GmbH") == "muller",
+        norm("España Ñandú") == "espana nandu",
+        norm("Café Société Anonyme") == "cafe societe anonyme",
+        norm("Ça va") == "ca va",
+        norm("TELEFÔNICA") == norm("telefônica") == norm("TELEFONICA"),
+        norm("Telecomunicações") == norm("TELECOMUNICAÇOES") == "telecomunicacoes",
+        norm("Ａｃｍｅ") == "acme",
+        norm("á") == "a" and norm("école") == norm("école") == "ecole",
+        norm("Telefónica") == norm(dm.fold_accents("Telefónica")),
+        norm("中国电信集团有限公司") == "中国电信集团有限公司",
+        norm("中国电信") != "" and norm("株式会社") != "",
+        norm("Яндекс Й") == "яндекс й",
+        norm("ООО Ростелеком") == "ооо ростелеком",
+        norm("شركة الاتصالات") == "شركة الاتصالات",
+        norm("서울 통신") == "서울 통신",
+        norm("Salesforce, Inc.") == "salesforce",
+        norm(None) == "" and norm("") == "",
+    ]
+    out.append(dm.matches_keyword(norm("TELEFÔNICA BRASIL S.A"), [dm.parse_keyword_entry("org: telefónica")]) == "telefonica")
+    out.append(dm.matches_keyword(norm("Telefónica Celular de Bolivia"), [dm.parse_keyword_entry("org: telefonica")]) == "telefonica")
+    out.append(dm.matches_keyword(norm("中国电信集团有限公司"), [dm.parse_keyword_entry("org: telecom")]) is None)
+    out.append(dm.matches_prefix(norm("Telefônica Brasil S.A"), [norm("telefónica brasil")]) == "telefonica brasil")
+    out.append(dm.matches_pattern("Telefónica-Réseau", ["*telefonica-reseau*"]) and dm.matches_pattern("139.162.1.1", ["139.162.0.0/16"]))
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        files = {
+            "e.txt": ["Telefónica Brasil S.A."],
+            "p.txt": ["Ação Telecom"],
+            "k.txt": ["org: telefônica", "telefonica", "org: telefonica"],
+            "c.txt": ["Société Générale"],
+            "g.txt": ["*TELEFÓNICA*"],
+        }
+        for name, lines in files.items():
+            (base / name).write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        out.append(dm.load_exact(base / "e.txt") == {"telefonica brasil s a"})
+        out.append(dm.load_prefixes(base / "p.txt") == ["acao telecom"])
+        out.append([(str(k), k.scope) for k in dm.load_keywords(base / "k.txt")] == [("telefonica", "org"), ("telefonica", "any")])
+        out.append(dm.load_cert_defaults(base / "c.txt") == {"societe generale"})
+        out.append(dm.load_patterns(base / "g.txt") == ["*telefonica*"])
+    out.append("" not in dm.load_exact() and "" not in dm.load_cert_defaults())
+    return out
+
+
 def run_tests():
     """Run all matcher cases and return how many passed."""
     kw = ["hosting", "vpn", "internet service provider", "chinanet"]
@@ -66,6 +117,7 @@ def run_tests():
             cases.append(False)
         except ValueError:
             cases.append(True)
+    cases.extend(accent_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)
