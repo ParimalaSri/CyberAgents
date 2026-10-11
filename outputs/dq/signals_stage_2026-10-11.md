@@ -16,8 +16,8 @@ companies 5,790 = signals 5,790 (asserted; company_id unique).
 | named_registrant | 5,387 | 93.04% | 5,387 | +0 | above 50% |
 | sensitive_stack | 55 | 0.95% | 55 | +0 | below 1% |
 | operator_shape_t1 | 1,046 | 18.07% | 1,046 | +0 |  |
-| operator_shape_t2 | 738 | 12.75% |  |  |  |
-| operator_name_shape | 1,438 | 24.84% | 1,438 | +0 |  |
+| operator_shape_t2 | 309 | 5.34% |  |  |  |
+| operator_name_shape | 1,248 | 21.55% | 1,248 | +0 |  |
 | kev_exposed | 462 | 7.98% | 462 | +0 |  |
 | cert_expired_or_soon | 373 | 6.44% | 373 | +0 |  |
 | eol_stack | 352 | 6.08% | 352 | +0 |  |
@@ -31,12 +31,12 @@ companies 5,790 = signals 5,790 (asserted; company_id unique).
 | footprint_band = 1 | 1,215 | 20.98% | 1,215 | +0 |  |
 | footprint_band = 2 | 318 | 5.49% | 318 | +0 |  |
 | footprint_band = 3 | 27 | 0.47% | 27 | +0 | below 1% |
-| T2 only (T2 and not T1) | 392 | 6.77% | 392 | +0 |  |
+| T2 only (T2 and not T1) | 202 | 3.49% | 202 | +0 |  |
 | risky_service_exposed SSH only | 158 | 2.73% | 158 | +0 |  |
 | any urgency signal | 1,294 | 22.35% | 1,294 | +0 |  |
 | strong urgency | 662 | 11.43% | 662 | +0 |  |
 
-Companies with any CVSS value: 739 (D9.4: 739). footprint_band 0 (one IP): 4,230 (D9.4: 4,230). in_territory is a PLACEHOLDER (US only) until the owner supplies the territory list; T2 is computed, not yet part of any penalty.
+Companies with any CVSS value: 739 (D9.4: 739). footprint_band 0 (one IP): 4,230 (D9.4: 4,230). in_territory is a PLACEHOLDER (US only) until the owner supplies the territory list; T2 is the D11.1 pattern (no `net` suffix branch).
 in_territory null (country_code null): 0.
 
 ## 3. Counted-host reconciliation (D6.4)
