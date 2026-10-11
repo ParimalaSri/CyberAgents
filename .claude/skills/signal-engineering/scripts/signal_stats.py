@@ -21,7 +21,8 @@ def pick_signals(con, requested):
     if requested:
         return [c.strip() for c in requested.split(",")]
     schema = con.execute("DESCRIBE t").fetchall()
-    return [name for name, dtype, *_ in schema if dtype.upper().startswith(NUMERIC_PREFIXES)]
+    return [name for name, dtype, *_ in schema
+            if dtype.upper().startswith(NUMERIC_PREFIXES) and not dtype.rstrip().endswith("]")]
 
 
 def print_coverage(con, signals):
