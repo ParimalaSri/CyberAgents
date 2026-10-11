@@ -21,11 +21,11 @@ SENSITIVE_TAGS = {"database", "ics", "medical", "iot"}
 LEGACY_VERSIONS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
 RISKY_PORTS = {22, 3389, 445, 3306, 6379, 27017, 9200, 5900, 23, 2375}
 CERT_SOON = timedelta(days=30)
-# D9.5 patterns, copied from the decision text (not from the stage). RE2 and Python re agree on this syntax.
+# D9.5 T1 and D11.1 T2 (no net suffix branch), copied from the decision text (not from the stage). RE2 and Python re agree on this syntax.
 T1 = re.compile(r"(^| )(internet|telekom|communications|hosting|hosted|servers?|broadband|cable|mobile|idc|infrastructure|research"
                 r"|telecom[a-z0-9]*|comunica[a-z0-9]*|network[a-z0-9]*)( |$)|data center|fixed network|(cloud|hosting)( |$)")
 T2 = re.compile(r"(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)"
-                r"|[a-z0-9]+(telecom|host|hosting|net|servers?)( |$)")
+                r"|[a-z0-9]+(telecom|host|hosting|servers?)( |$)")
 CARRIED = ("company_id", "company_name", "name_norm", "identity_source", "identity_confidence", "host_count", "distinct_host_ips",
            "country_code", "noise_host_count", "noise_host_share")
 SIGNAL_COLUMNS = ("counted_host_count", "host_signals_blind", "is_singleton", "in_territory", "named_registrant", "footprint_size",
@@ -43,7 +43,7 @@ PHI_LIMIT = 0.8
 D9_COUNTS = {"kev_exposed": 462, "max_cvss_band = 3": 460, "max_cvss_band = 2": 209, "max_cvss_band = 1": 70, "cert_expired_or_soon": 373,
              "eol_stack": 352, "legacy_tls": 209, "risky_service_exposed": 226, "risky_service_exposed SSH only": 158, "risky_non_ssh_exposed": 68,
              "exposed_and_outdated": 48, "sensitive_stack": 55, "named_registrant": 5387, "in_territory": 1346, "is_singleton": 4169,
-             "host_signals_blind": 180, "operator_shape_t1": 1046, "operator_name_shape": 1438, "T2 only": 392, "any urgency signal": 1294,
+             "host_signals_blind": 180, "operator_shape_t1": 1046, "operator_shape_t2": 309, "operator_name_shape": 1248, "T2 only": 202, "any urgency signal": 1294,
              "strong urgency": 662, "footprint_band = 1": 1215, "footprint_band = 2": 318, "footprint_band = 3": 27, "footprint_band = 0": 4230,
              "any CVSS": 739}
 HOST_COLUMNS = "identity_source, name_norm, host_ip, port, transport, timestamp, tags, ssl_versions, cert_expires, cert_expired, max_cvss, has_kev"

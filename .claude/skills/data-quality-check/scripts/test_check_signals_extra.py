@@ -43,6 +43,8 @@ SYNTHETIC_HOSTS = [
     # rackhost: T2-only name; sensitive tag; cvss 6.9 (band 1); port 9200 risky but no eol and cvss below 7
     host("org", "rackhost", "6.6.6.1", 80, tags=["iot"], cvss=6.9),
     host("org", "rackhost", "6.6.6.2", 9200),
+    # bellnet: a plain ...net name; D11.1 dropped the net suffix branch, so neither T1 nor T2 may flag it
+    host("org", "bellnet", "13.0.0.1", 80),
     # quiet corp: nothing at all
     host("org", "quiet corp", "7.7.7.1", 80),
     # mixed cert: one clean counted host plus one cdn-tagged host with kev and a risky port (must not count)
@@ -59,7 +61,7 @@ SYNTHETIC_HOSTS = [
 SYNTHETIC_COMPANIES = {
     "acme": ("Acme Inc.", "US", 1), "gamma": ("Gamma Corp", "FR", 0), "delta": ("Delta Ltd", "DE", 0), "beta": ("Beta LLC", "DE", 0),
     "epsilon servers": ("Epsilon Servers", None, 0), "rackhost": ("Rackhost Zrt.", "JP", 0), "quiet corp": ("Quiet Corp", "US", 0),
-    "mixed cert": ("Mixed Cert Ltd", "GB", 0), "kappa": ("Kappa SA", "BR", 0), "bigco": ("BigCo", "US", 0), "midco": ("MidCo", "CA", 0),
+    "mixed cert": ("Mixed Cert Ltd", "GB", 0), "kappa": ("Kappa SA", "BR", 0), "bellnet": ("Bellnet", "CA", 0), "bigco": ("BigCo", "US", 0), "midco": ("MidCo", "CA", 0),
 }
 
 COMPANIES_SQL = """
@@ -101,7 +103,7 @@ SELECT c.company_id, c.company_name, c.name_norm, c.identity_source, c.identity_
        (CASE WHEN c.distinct_host_ips = 1 THEN 0 WHEN c.distinct_host_ips <= 5 THEN 1 WHEN c.distinct_host_ips <= 20 THEN 2 ELSE 3 END)::SMALLINT AS footprint_band,
        coalesce(a.n_sens, 0) > 0 AS sensitive_stack,
        regexp_matches(c.name_norm, '(^| )(internet|telekom|communications|hosting|hosted|servers?|broadband|cable|mobile|idc|infrastructure|research|telecom[a-z0-9]*|comunica[a-z0-9]*|network[a-z0-9]*)( |$)|data center|fixed network|(cloud|hosting)( |$)') AS operator_shape_t1,
-       regexp_matches(c.name_norm, '(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)|[a-z0-9]+(telecom|host|hosting|net|servers?)( |$)') AS operator_shape_t2,
+       regexp_matches(c.name_norm, '(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)|[a-z0-9]+(telecom|host|hosting|servers?)( |$)') AS operator_shape_t2,
        false AS operator_name_shape,
        coalesce(a.n_kev, 0) > 0 AS kev_exposed, coalesce(a.n_kev, 0)::INTEGER AS kev_host_count, a.cvss AS max_cvss,
        (CASE WHEN a.cvss IS NULL THEN 0 WHEN a.cvss >= 9 THEN 3 WHEN a.cvss >= 7 THEN 2 ELSE 1 END)::SMALLINT AS max_cvss_band,
@@ -140,6 +142,10 @@ MUTATIONS = [
     ("carried company_name differs from companies", ["UPDATE s SET company_name = 'Acme Incorporated' WHERE name_norm = 'acme'"], ("contract", "extra"), True),
     ("carried host_count differs from companies", ["UPDATE s SET host_count = host_count + 1, is_singleton = false WHERE name_norm = 'beta'"], ("contract", "extra"), True),
     ("T1 flag flipped (union unchanged)", ["UPDATE s SET operator_shape_t1 = false WHERE name_norm = 'epsilon servers'"], ("contract", "extra"), True),
+    ("D11.1: a plain ...net name flagged by T2 (union kept consistent)", ["UPDATE s SET operator_shape_t2 = true, operator_name_shape = true WHERE name_norm = 'bellnet'"],
+     ("contract", "extra"), True),
+    ("D11.1: a T2-only name no longer flagged (union kept consistent)", ["UPDATE s SET operator_shape_t2 = false, operator_name_shape = false WHERE name_norm = 'rackhost'"],
+     ("contract", "extra"), True),
     ("union not equal to T1 or T2", ["UPDATE s SET operator_name_shape = false WHERE name_norm = 'rackhost'"], ("contract", "extra"), True),
     ("host-blind company with kev true", ["UPDATE s SET kev_exposed = true, kev_host_count = 1 WHERE name_norm = 'gamma'"], ("contract", "extra"), True),
     ("host_signals_blind false while counted is 0", ["UPDATE s SET host_signals_blind = false WHERE name_norm = 'gamma'"], ("contract", "extra"), True),
@@ -233,12 +239,14 @@ class UnitTests(unittest.TestCase):
         self.assertFalse(extra.host_flags({**base, "identity_source": "org", "port": 12304})["risky"])
 
     def test_regexes_named_positives_and_near_misses(self):
-        """T1 and T2 fire on operator names and not on near misses (D9.5; the suffix net also flags real words by design)."""
+        """T1 and T2 fire on operator names and not on near misses (D9.5, D11.1: no net suffix branch)."""
         for name in ("epsilon servers", "acme hosting", "telia telecom", "cloud nine", "strato rechenzentrum"):
             self.assertTrue(extra.T1.search(name) or extra.T2.search(name), name)
         self.assertTrue(extra.T2.search("rackhost") and not extra.T1.search("rackhost"))
-        self.assertTrue(extra.T2.search("g2net sul provedor"))
-        self.assertTrue(extra.T2.search("planet") and not extra.T1.search("planet"))
+        for name in ("sibirtelecom", "strato rechenzentrum", "rackhost"):
+            self.assertTrue(extra.T2.search(name), name)
+        for name in ("bellnet", "public subnet", "planet", "magnet", "g2net sul provedor"):  # D11.1: the net suffix branch is gone
+            self.assertFalse(extra.T2.search(name), name)
         for name in ("acme", "quiet corp", "internetworking", "serversmith", "hostage"):
             if name == "hostage":
                 self.assertTrue(extra.T2.search(name))  # host[a-z0-9]* is a token prefix; documented over-flagging

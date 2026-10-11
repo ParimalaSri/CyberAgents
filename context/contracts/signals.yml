@@ -125,15 +125,15 @@ checks:
     sql: >-
       SELECT count(*) FROM t WHERE footprint_band IS DISTINCT FROM (CASE WHEN distinct_host_ips <= 1 THEN 0 WHEN distinct_host_ips <= 5 THEN 1
       WHEN distinct_host_ips <= 20 THEN 2 ELSE 3 END)
-  # ---- operator name shape (D9.5; patterns copied from the decision text, not from the stage) --------------------------------------
+  # ---- operator name shape (D9.5 T1, D11.1 T2; patterns copied from the decision text, not from the stage) --------------------------------------
   - name: operator_shape_t1 equals the D9.5 T1 regex on name_norm
     sql: >-
       SELECT count(*) FROM t WHERE operator_shape_t1 IS DISTINCT FROM regexp_matches(name_norm,
       '(^| )(internet|telekom|communications|hosting|hosted|servers?|broadband|cable|mobile|idc|infrastructure|research|telecom[a-z0-9]*|comunica[a-z0-9]*|network[a-z0-9]*)( |$)|data center|fixed network|(cloud|hosting)( |$)')
-  - name: operator_shape_t2 equals the D9.5 T2 regex on name_norm
+  - name: operator_shape_t2 equals the D11.1 T2 regex on name_norm (D9.5 T2 without the net suffix branch; a plain ...net name is not flagged)
     sql: >-
       SELECT count(*) FROM t WHERE operator_shape_t2 IS DISTINCT FROM regexp_matches(name_norm,
-      '(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)|[a-z0-9]+(telecom|host|hosting|net|servers?)( |$)')
+      '(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)|[a-z0-9]+(telecom|host|hosting|servers?)( |$)')
   - name: operator_name_shape equals (operator_shape_t1 OR operator_shape_t2) (D9.5 union, D9.4 column 21)
     sql: "SELECT count(*) FROM t WHERE operator_name_shape IS DISTINCT FROM (operator_shape_t1 OR operator_shape_t2)"
   # ---- counts and booleans (D9.4 definitions, D9.9 rule 4) --------------------------------------------------------------------
