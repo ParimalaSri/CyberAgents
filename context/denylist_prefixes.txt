@@ -1,7 +1,8 @@
 # CyberIntel denylist PREFIX families (PROPOSED, not approved; decisions D1, D2, D4 in docs/ARCHITECTURE.md section 15).
 # Owner accepted these 40 families as listed on 2026-10-11.
-# Two website-builder families (weebly, jimdo) were added after that on the same date under decision D2 (website builders are
-# infrastructure); they are not part of the 40 the owner accepted and are listed in outputs/denylist_keyword_review.md.
+# Four website-builder families (weebly, jimdo, automattic, tumblr) were added after that on the same date under decision D2 (website
+# builders are infrastructure; owner-approved for automattic = WordPress.com and tumblr); they are not part of the 40 the owner accepted.
+# weebly and jimdo are listed in outputs/denylist_keyword_review.md; automattic and tumblr in outputs/denylist_cleanup_review.md.
 # Rule: a name matches when its NORMALISED form equals the entry or starts with the entry followed by a space
 # (word-boundary prefix). Normalise with scripts/denylist_match.py normalise(): lowercase, punctuation stripped,
 # trailing legal-suffix words removed. Example: "Palo Alto Networks, Inc." -> "palo alto networks" matches "palo alto".
@@ -47,6 +48,8 @@ shopify
 squarespace
 weebly
 jimdo
+automattic
+tumblr
 vercel
 bitly
 godaddy

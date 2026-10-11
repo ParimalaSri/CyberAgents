@@ -150,3 +150,59 @@ def matches_pattern(value, patterns):
         elif fnmatch.fnmatchcase(text, pattern):
             return True
     return False
+
+
+ISP_MATCHING_MODES = ("ignore", "exclude")
+# Evidence-based default (RAW-013, outputs/denylist_cleanup_review.md): only 22 of 50 reviewed orgs excluded purely through their isp text
+# were infrastructure (44%, gate is 90%), so the isp field does NOT exclude a row by itself. Use "exclude" only to reproduce the old behaviour.
+DEFAULT_ISP_MATCHING = "ignore"
+
+
+def load_rules(context_dir=None):
+    """Load the exact, prefix, pattern and keyword rule sets from a context directory into one dict."""
+    base = Path(context_dir) if context_dir else CONTEXT_DIR
+    return {
+        "exact": load_exact(base / "denylist.txt"),
+        "prefixes": load_prefixes(base / "denylist_prefixes.txt"),
+        "patterns": load_patterns(base / "denylist_patterns.txt"),
+        "keywords": load_keywords(base / "denylist_keywords.txt"),
+    }
+
+
+def match_name(value, field, rules):
+    """Return (rule_type, entry) for the first exact, prefix, pattern or keyword rule matching a name in `field`, else None."""
+    if not value:
+        return None
+    normalised = normalise(value)
+    if normalised in rules["exact"]:
+        return ("exact", normalised)
+    prefix = matches_prefix(normalised, rules["prefixes"])
+    if prefix:
+        return ("prefix", prefix)
+    if matches_pattern(value, rules["patterns"]):
+        return ("pattern", fold_pattern_text(value))
+    keyword = matches_keyword(normalised, rules["keywords"], field=field)
+    if keyword:
+        return ("keyword", str(keyword))
+    return None
+
+
+def infrastructure_reason(row, rules, isp_matching=DEFAULT_ISP_MATCHING):
+    """Return why a row is infrastructure (D4 rule), or None; row keys: org, isp, cloud_provider, tags, ip. isp_matching 'ignore' (default) or 'exclude' (old behaviour)."""
+    if isp_matching not in ISP_MATCHING_MODES:
+        raise ValueError("isp_matching must be one of " + ", ".join(ISP_MATCHING_MODES))
+    if row.get("cloud_provider"):
+        return "cloud_provider"
+    tags = row.get("tags") or []
+    if "cloud" in tags or "cdn" in tags:
+        return "tag_rule"
+    if row.get("ip") and matches_pattern(row["ip"], rules["patterns"]):
+        return "ip_pattern"
+    hit = match_name(row.get("org"), "org", rules)
+    if hit:
+        return "org_" + hit[0]
+    if isp_matching == "exclude":
+        hit = match_name(row.get("isp"), "isp", rules)
+        if hit:
+            return "isp_" + hit[0]
+    return None

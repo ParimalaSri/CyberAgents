@@ -20,9 +20,9 @@ broadband
 web hosting
 vps
 telecommunications
-cable
 fibre
-dedicated
+# Removed by the owner on 2026-10-11 as ordinary words (too generic to mean infrastructure): telephone, cable, dedicated. They had passed the
+# gate (cable 46/50, dedicated 20/22, telephone 20/20 org-only) but are no longer applied. Gate figures for them are kept in the review files.
 # ORG-ONLY entries (gate run on org text only, among rows surviving every other rule; figures in outputs/denylist_orgonly_review.md):
 # gate results (INFRA / reviewed): telecom 47/50 (re-run after folding), telekom 32/35,
 # telecommunication 20/20, telefonica 23/24 (merged with the accented telefonica spellings), telephone 20/20, telecoms 3/3, telkom 5/5, telcom 4/4.
@@ -34,7 +34,6 @@ org: telecom
 org: telekom
 org: telecommunication
 org: telefonica
-org: telephone
 org: telecoms
 org: telkom
 org: telcom

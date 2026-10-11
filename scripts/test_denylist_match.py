@@ -63,6 +63,45 @@ def accent_cases():
     return out
 
 
+def isp_cases():
+    """Return assertions for the isp-matching switch, the website-builder prefixes and the removed generic keywords."""
+    rules = dm.load_rules()
+    norm = dm.normalise
+    abtc = {"org": "ABTC IMOVEIS LTDA ME", "isp": "TELEFONICA BRASIL S.A", "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = [
+        dm.DEFAULT_ISP_MATCHING == "ignore",
+        dm.infrastructure_reason(abtc, rules) is None,
+        dm.infrastructure_reason(abtc, rules, isp_matching="ignore") is None,
+        dm.infrastructure_reason(abtc, rules, isp_matching="exclude") == "isp_exact",
+        dm.infrastructure_reason(dict(abtc, org="Google LLC"), rules) == "org_exact",
+        dm.infrastructure_reason(dict(abtc, org="Google LLC", isp="x"), rules) == "org_exact",
+        dm.infrastructure_reason(dict(abtc, cloud_provider="Oracle Cloud Infrastructure"), rules) == "cloud_provider",
+        dm.infrastructure_reason(dict(abtc, tags=["cdn"]), rules) == "tag_rule",
+        dm.infrastructure_reason(dict(abtc, tags=["cloud", "eol-os"]), rules) == "tag_rule",
+        dm.infrastructure_reason(dict(abtc, ip="139.162.5.5"), rules) == "ip_pattern",
+        dm.infrastructure_reason(dict(abtc, org="Krystal Hosting Ltd", isp=None), rules) == "org_keyword",
+        dm.infrastructure_reason(dict(abtc, org=None, isp="Google LLC"), rules) is None,
+        dm.infrastructure_reason(dict(abtc, org=None, isp="Google LLC"), rules, isp_matching="exclude") == "isp_exact",
+        dm.matches_prefix(norm("Automattic, Inc"), rules["prefixes"]) == "automattic",
+        dm.matches_prefix(norm("TUMBLR, INC."), rules["prefixes"]) == "tumblr",
+        dm.matches_prefix(norm("Automattic Consulting"), rules["prefixes"]) == "automattic",
+        dm.matches_prefix(norm("Tumblrfoo Corp"), rules["prefixes"]) is None,
+        dm.match_name("Telephone Answering Service Inc", "org", rules) is None,
+        dm.match_name("Cable Car Museum", "org", rules) is None,
+        dm.match_name("Dedicated Staffing LLC", "org", rules) is None,
+        dm.match_name("Acme Fibre Networks", "org", rules) == ("keyword", "fibre"),
+        dm.match_name(None, "org", rules) is None,
+    ]
+    for bad in ("cable", "dedicated", "telephone"):
+        out.append(bad not in [str(k) for k in rules["keywords"]])
+    try:
+        dm.infrastructure_reason(abtc, rules, isp_matching="sometimes")
+        out.append(False)
+    except ValueError:
+        out.append(True)
+    return out
+
+
 def run_tests():
     """Run all matcher cases and return how many passed."""
     kw = ["hosting", "vpn", "internet service provider", "chinanet"]
@@ -118,6 +157,7 @@ def run_tests():
         except ValueError:
             cases.append(True)
     cases.extend(accent_cases())
+    cases.extend(isp_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)

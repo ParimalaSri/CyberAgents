@@ -113,10 +113,17 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   89,446 to 89,398 rows (89.40%), surviving 10,554 to 10,602 (10.60%), surviving distinct orgs 4,838 to 4,863; folding alone moves 24 rows to infrastructure.
   Details: `outputs/denylist_accent_folding.md`. Still true: `check_contract.py` applies none of the prefix, pattern, keyword or normalisation rules (RAW-010); the
   data-quality-engineer must import `scripts/denylist_match.py`. Quirk: "S.A." normalises to "s a" and is not dropped as a legal suffix.
+- Update 2026-10-11, branch `feat/data-integrator/denylist-cleanup` (proposed): (1) `automattic` and `tumblr` added as prefixes (D2; 27 rows). (2) Owner removed
+  the generic keywords `telephone`, `cable`, `dedicated` (`fibre` kept; 162 rows return to surviving). (3) ISP-field decision by measurement: 3,516 rows
+  (798 distinct non-null orgs, plus 50 null-org rows) were excluded ONLY through isp text (3,331 exact, 120 keyword, 15 prefix, 0 pattern, non-null org rows);
+  hand review of 50 orgs found 22 INFRA (44%), gate 90% FAILED. Decision: isp text no longer excludes by itself; `cloud.provider`, `cloud`/`cdn` tags and the IP
+  CIDR rule are unchanged. `infrastructure_reason(row, rules, isp_matching="ignore")` in `scripts/denylist_match.py` ("exclude" reproduces the old behaviour;
+  85 tests pass). Spread sample: infrastructure 89,398 to 85,747 (89.40% to 85.75%), surviving 10,602 to 14,253, surviving distinct orgs 4,863 to 5,664.
+  The D4 wording in ARCHITECTURE.md must change from "org, isp or cloud.provider" to org text only (owner/senior-data-engineer). Details:
+  `outputs/denylist_cleanup_review.md`. Item (3) below (Automattic / Tumblr) is done.
 - What remains: (1) 18 candidates failed the gate in the first round and are not applied, including communications (78.0%), isp, idc, fiber,
   mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
-  but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr
-  (49 rows) not added: owner to say whether WordPress.com counts as a website builder. (4) The rules are not enforced anywhere yet: `check_contract.py` still
+  but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr added (see the denylist-cleanup update). (4) The rules are not enforced anywhere yet: `check_contract.py` still
   understands only the exact list (RAW-010) and does not apply prefix, pattern or keyword rules. (5) Not yet run on the full file.
 - Contract rule: companies row share outside 5-20% flagged (already planned); keyword-leakage check once `check_contract.py` calls `matches_keyword`.
 
