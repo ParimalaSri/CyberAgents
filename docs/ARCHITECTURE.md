@@ -76,16 +76,24 @@ Evidence (head sample, 100,000 rows; D3 probe in section 15 for the full-file cr
 | rows left after the filter | 9.5%, spread over 4,607 distinct orgs | 10.5% (per-window range 3.6% to 20.2%) |
 | orgs with a single row | 66% (3,656 of 5,535 distinct) | n/a |
 
-The README and the app footer will carry one sentence: "about 88% of scanned services sit on shared
-infrastructure and cannot be attributed to a customer". The number "88" is only a rounded point inside the 86.8% to 90.5% range
-above. **It must be replaced by the exact figure that `2_companies` prints on the spread sample and, later, the full
-file.** That figure is computed from the D4 rules, which also use the `cloud`/`cdn` tags and so may differ.
+**Measured on the spread sample (D3; 100,000 rows; 2026-10-11, rules as in D4 and D5; reproduced by the data-integrator
+and checked by `scripts/denylist_match.py`):** infrastructure 85,747 rows (**85.75%**), surviving 14,253 rows (**14.25%**), over
+5,664 distinct surviving orgs. The earlier expectations of about 86% infrastructure with about 10% surviving were only partly
+reproduced: infrastructure is close (85.75%), but surviving is 14.25%, not about 10%. The gap is not a sampling effect. The 90.5% in the
+table above came from also matching the isp text, which D5 retired, and the head sample is a different slice of the hour. This
+section's "about 10%" and the "about 10% to 12%" in D4 were estimates, not measurements, and are superseded by 14.25%.
+
+The README and the app footer will carry one sentence: "about 86% of scanned services sit on shared
+infrastructure and cannot be attributed to a customer". The 86 is the measured 85.75% rounded. **It must be replaced by the
+exact figure that `2_companies` prints on the spread sample and, later, the full file** (the full-file probe gave 85.7% on exact org only,
+a different rule, so it is not a confirmation).
 
 How it is reported: `2_companies` prints and writes `outputs/dq/companies_<date>.md` with, per `identity_source`
 (`org`, `cert_o`, `infrastructure_unresolved`, `null_org`, `noise`), the share of rows and the share of distinct
-`host_ip`, and the `infra_reason` breakdown (hyperscaler, security_edge, website_platform, hosting, isp, tag_rule).
-Shares must sum to 100%. The companies contract flags a resolved-row share outside 5% to 20% (expected about 10%
-to 12% from the sample). The app's data-quality tab shows the same table.
+`host_ip`, and the `infra_reason` breakdown (`cloud_provider`, `tag_rule`, `ip_pattern`, `org_exact`, `org_prefix`,
+`org_pattern`, `org_keyword`; spread sample, in that order: 40,537 / 22,000 / not reported / 21,215 / 164 / 63 / 1,768; the six reported values sum to
+85,747, so no `ip_pattern` rows were seen and `2_companies` must confirm that). Shares must sum to 100%. The companies contract flags a
+resolved-row share outside 5% to 20% (measured 14.25% on the spread sample). The app's data-quality tab shows the same table.
 
 ### 2.1 BRONZE: `data/raw/`
 
@@ -495,7 +503,7 @@ review. Subagents hand over through files; the main session routes. Not in paral
 |---|---|
 | Why | The head sample (first 100,000 lines) covers about 12 of the 61 minutes and over-weights one port sweep (port 12304 is 10.6% of it, about 1.7% in the probe). See D3. |
 | Dev sample | **Seek-spread:** 1,000 evenly spaced positions, fixed seed for jitter, 100 complete lines after each, so 100,000 rows and about 1 GB read. Built by a `scripts/` utility (data-integrator). |
-| Verification | Re-profile the spread sample before `1_clean` is written. Expect denylist share about 86% and port 12304 about 2%. If not, stop and report. |
+| Verification | Re-profile the spread sample before `1_clean` is written. Done 2026-10-11: infrastructure 85.75% (expected about 86%, met), surviving 14.25% (expected about 10%, not met), port 12304 0.22% (expected about 2%, not met), span about 71 minutes. Reported and accepted in D3; no stop was needed because the departures are explained there. |
 | Full run | Only after the sample output has passed DQ and the owner has checked it. File is about one hour of scanning, **estimated 7.6M to 8.9M rows** (from 11.1 KB per row in the head sample and 9.5 KB per row in the probe). |
 | Keep | The head sample stays for reproducing `outputs/profile_sample_100k.md`. It is not used for development. |
 
@@ -626,10 +634,10 @@ with M3/M4 (independent work), and `tech-writer` can draft docs while evals run.
 
 ---
 
-## 15. Data decisions (D1-D4)
+## 15. Data decisions (D1-D5)
 
 Decided 2026-10-11 on branch `feat/senior-data-engineer/data-decisions`. **Status: proposed, pending owner approval.**
-The pipeline must not depend on any of D1-D4 until the owner approves them.
+The pipeline must not depend on any of D1-D4 until the owner approves them. D5 was added later the same day, see its own status line.
 
 ### Evidence base
 - `outputs/profile_sample_100k.md`: the first 100,000 lines of the dump (1.11 GB). This is the "head sample".
@@ -709,8 +717,12 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   every port-based signal and the score calibration. (b) A true uniform random sample (reservoir over about 8M rows).
   Rejected for dev because it scans all 84 GB. It is acceptable later as a one-off validation if the owner wants one.
   (c) Contiguous chunks of 10,000 lines. Rejected because each chunk inherits a burst.
-- **Consequences.** Re-run the profile on the spread sample before `1_clean` is written, and confirm that the
-  denylist share is about 86% and port 12304 is about 2%. Signals that depend on port must be calibrated only on the
+- **Measured outcome (2026-10-11, spread sample `data/sample/spread_100k.jsonl`).** Infrastructure 85.75%, surviving 14.25%.
+  Port 12304 is 218 of 100,000 rows (**0.22%**), not about 2%: the expectation was not reproduced, and the sample is
+  less burst-prone than the probe, which is the intent of D3. Timestamps span 09:54:53 to 11:05:46, **about 71 minutes**, not 61: the
+  file's hour is longer than the probe saw (the probe's last window ended 11:00:12). The expectations in the old text (86%, 10%, 2%)
+  were therefore only matched for infrastructure. Nothing was stopped for this; the figures replace the estimates.
+- **Consequences.** The profile was re-run on the spread sample before `1_clean`; see the measured outcome above. Signals that depend on port must be calibrated only on the
   spread sample. The prod run uses the full file. The 100K-row cost and DQ ceilings are unchanged.
 
 ### D4. Company identity: non-infrastructure `org` first, then cert subject O; hostnames are evidence only in v1
@@ -725,7 +737,8 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   recorded in `identity_source`.
   1. `noise`: tag honeypot/c2/tor/compromised, or a RAT/C2 `_shodan.module`. Never a company.
   2. `org`: normalised `org` (case, punctuation, legal suffix) that is not infrastructure. Infrastructure means a
-     denylist family match on org, isp or cloud.provider, OR a non-null `cloud.provider`, OR a `cloud`/`cdn` tag.
+     denylist match (exact, prefix, pattern or keyword) on the org text, OR a non-null `cloud.provider`, OR a
+     `cloud`/`cdn` tag, OR the host IP matching a pattern CIDR. **The isp text is not used by itself** (D5).
   3. `cert_o`: the row is infrastructure, and `ssl.cert.subject.O`, after normalisation, is not a default or vendor
      value. A default-value list is needed: acme co, default company ltd, internet widgits pty ltd, plesk, plus the
      denylisted vendors.
@@ -737,18 +750,66 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
   requires a check by data-quality-engineer: hand-review 50 random domain-derived tenants, with at least 90% being
   real, distinct companies.
 - **Unresolved reporting.** `2_companies` prints, and writes to `outputs/dq/companies_<date>.md`, the row share and
-  distinct host_ip share for each `identity_source`, plus the `infra_reason` breakdown (hyperscaler, security_edge,
-  website_platform, hosting, isp, tag_rule). The shares must sum to 100%. The companies contract flags a resolved
-  row share outside 5% to 20% (expected about 10% to 12%). The same headline number ("about 88% of scanned services
+  distinct host_ip share for each `identity_source`, plus the `infra_reason` breakdown (`cloud_provider`, `tag_rule`,
+  `ip_pattern`, `org_exact`, `org_prefix`, `org_pattern`, `org_keyword`; the older category names hyperscaler, security_edge,
+  website_platform, hosting and isp are no longer values). The shares must sum to 100%. The companies contract flags a resolved
+  row share outside 5% to 20% (measured 14.25% on the spread sample). The same headline number ("about 86% of scanned services
   sit on shared infrastructure and cannot be attributed to a customer") goes into the README and the app footer.
 - **Alternatives considered.** (a) `org` only. Rejected: it drops the few tenants we can prove from certs at no
   cost. (b) Tenant identity first (cert or hostname over org). Rejected: cert O is 98% null and polluted by
   defaults, and domain precision is unmeasured. Ranking it above a clean registry org lowers precision.
   (c) Treat domains as equal to cert O now. Rejected until the 50-row precision check passes.
-- **Consequences.** Recall is low by design. About 10% of rows yield companies, spread over about 4,600 orgs in
+- **Consequences.** Recall is low by design. About 14% of rows yield companies (spread sample), spread over 5,664 distinct orgs in
   100K rows. 66% of distinct orgs have a single row, so banner counts are a weak size proxy. The largest loss is
   the vulnerable estate on hosting providers (Aliyun 426, Amazon 255, DigitalOcean 97 vulnerable head rows): the
   exposure is real but cannot be attributed to an owner.
+
+### D5. ISP field and denylist rule scope: the isp text never excludes a row by itself
+*Decided by senior-data-engineer under the owner's delegation, 2026-10-11. Status: decided; the owner may overrule.*
+- **Context.** In Shodan data `org` is the registrant of the IP block and `isp` is the upstream network. Matching the denylist on
+  `isp` as well as `org` excluded 3,516 rows (798 distinct non-null orgs, plus 50 null-org rows) of the spread sample whose org
+  alone would survive. Gate: a names-only review of 50 of those orgs (the 25 largest, then 25 from a seeded shuffle, UNSURE counted
+  as real) found **22 of 50 (44%) infrastructure against a 90% threshold: FAILED** (`outputs/denylist_cleanup_review.md` section 3.3).
+  The five largest, 1,293 rows, are real companies: Egnyte 331, Fiserv 329, Wal-Mart 246, Avago 239, TGS Management 148,
+  all with isp `google`. The open question was whether an isp-only rule limited to hyperscaler/CDN isp names (google, amazon com,
+  cloudflare, ovh, fastly) should be kept.
+- **Evidence for that question** (read-only, spread sample, rows whose org survives and whose isp is one of those names):
+  1,963 rows, 169 distinct orgs, 1,216 distinct IPs. By isp: google 1,683 (58 orgs), ovh 94, amazon com 88, cloudflare 62, fastly 28,
+  akamai 4, oracle 3, digitalocean 1. Tenancy evidence is almost absent: 1 row of 1,963 has a provider reverse-DNS or domain
+  (`googleusercontent.com`, `amazonaws.com`, `cloudfront.net`, ovh/fastly/cloudflare names; the one is a person-named org);
+  0 of the 1,683 Google-isp rows carry any tag or a `cloud.provider` (all would have been excluded by the unchanged tag rules);
+  0 of them have a vulnerability (the group's 14 vulnerable rows are all non-Google); 278 of them (16.5%) have hostnames, and for
+  Wal-Mart all 246 rows resolve to `walmart.com`. The top 5 Google-isp orgs hold 1,293 rows across 82 to 169 distinct IPs each, on
+  scattered high ports, with no product fingerprint: the pattern of an organisation's own address block announced through a
+  Google network, not of a workload on a Google Cloud address. Among the non-Google isp rows, most are mixed: Adobe on its own
+  `adobedc.net` names (30 rows), GitHub behind Fastly (28), Zendesk and Webflow behind Cloudflare, and several OVH affiliates
+  (OVH Singapore 17, OVH Hispano 9, OVHTECH 7, OVH NWK 6, OVH BE 5) that are infrastructure by org name.
+- **Decision.** Keep `isp_matching="ignore"`. Do not restore any isp-only rule, narrow or partial. Infrastructure is: a denylist
+  match (exact, prefix, pattern or keyword) on the org text, OR a non-null `cloud.provider`, OR a `cloud`/`cdn` tag, OR the
+  host IP matching a pattern CIDR. The OVH affiliates are an org-name gap and are fixed on the org side (below), not via isp.
+- **Why not a partial restore on provider reverse-DNS.** It would remove 1 row of 1,963, so it is not worth a rule. The tag and
+  `cloud.provider` rules already catch the hosts that really are cloud tenants.
+- **Cost of being wrong.** If we are wrong to ignore: the Google-isp customers (58 orgs, 1,683 rows) are in the list although their
+  address space is Google Cloud tenancy. Effect: some accounts have a `why` built on hosts that belong to a Google Cloud project; the
+  IP block is still registered to that customer, and the group has 0 vulnerable rows, so no urgency is claimed from it. A salesperson
+  contacts a real company with imperfect attribution. If we restore the rule and are wrong: 58 real companies (Egnyte, Fiserv,
+  Wal-Mart, Equifax, ...) vanish silently, recall falls further on a list that already keeps only 14%, and the loss is invisible
+  because excluded rows only appear in a count. Precision is protected by the tag rule either way. The second error is worse
+  and less visible, so the choice is ignore.
+- **Alternatives considered.** (a) Restore the isp rule for the five names. Rejected: no tenancy evidence in 1,963 rows,
+  and 1,683 of the rows are Google-isp customers. (b) Restore on reverse-DNS evidence only. Rejected: 1 row. (c) Keep isp matching
+  for all names. Rejected: gate failed 44% against 90%.
+- **Org-side follow-ups (integrator, gated as before).** `ovh` is under 4 characters so it is exact-only; OVH affiliates survive. Test
+  an org-scoped keyword `ovh` through the usual 90% gate before adding it. Webflow (10 rows, one IP) fits D2 (website builder);
+  the owner must approve adding it, as with weebly, jimdo, automattic and tumblr.
+- **Consequences.** Infrastructure 85.75%, surviving 14.25% (14,253 rows, 5,664 distinct orgs), up from 89.40% / 10.60% before
+  the cleanup. 1,026 of 3,076 vulnerable rows (33.4%) sit on surviving rows. The 3,516 released rows carry 120 vulnerable rows, so
+  most of the gain is non-urgent. `exclude` mode stays in code only to reproduce old counts.
+- **Known weakness.** The denylist is validated by a names-only review by a single reviewer on a 100K sample, with UNSURE counted
+  as real and no external lookup. The 22/50 result is far enough from 90% that this does not change the decision, but every
+  denylist rule that passed its gate carries the same limit, and `check_contract.py` still enforces none of the prefix, pattern or
+  keyword rules (RAW-010). The tenancy-versus-own-estate reading of the Google-isp group is inferred from the registrant, hostnames and
+  port patterns; it was not confirmed by any external lookup (WHOIS, BGP) or by the customer.
 
 ### Denylist changes implied (for data-integrator / owner to apply to `context/denylist.txt`)
 1. Keep: microsoft*, oracle*, ibm, ibm cloud, softlayer*, zscaler*, palo alto networks*, imperva*, incapsula*,
@@ -777,6 +838,7 @@ Estimated size: 7.6M to 8.9M rows, from 11.1 KB per row in the head sample and 9
 - **Scoring:** no recency signal. Port signals are calibrated only on the spread sample.
 
 ### Known weaknesses of these decisions
+- The denylist (all rule types) is validated by names-only, single-reviewer review on a 100K sample (see D5).
 - The probe covered 9,239 rows from 21 contiguous windows. It is not a random sample, and rows within a window are
   correlated. Per-window kept share ranged from 3.6% to 20.2%.
 - `context/business.md` and `context/icp.md` are empty on this branch. The D1 and D2 buyer reasoning relies on the
