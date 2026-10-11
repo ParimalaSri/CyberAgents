@@ -102,6 +102,48 @@ def isp_cases():
     return out
 
 
+def d5_followup_cases():
+    """Return assertions for the org-scoped ovh keyword, the webflow prefix and the pinned infra_reason value set."""
+    rules = dm.load_rules()
+    norm = dm.normalise
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = [
+        ("ovh", "org") in [(str(k), k.scope) for k in rules["keywords"]],
+        dm.match_name("OVH Singapore PTE. LTD", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("OVH Hispano", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("OVH (NWK)", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("Dedicated servers OVH", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("OVHTECH R&D (INDIA) PRIVATE LIMITED", "org", rules) is None,
+        dm.match_name("Hovhannes Consulting", "org", rules) is None,
+        dm.match_name("Novhost Media", "org", rules) is None,
+        dm.match_name("OVH Singapore", "isp", rules) is None,
+        dm.infrastructure_reason(dict(base, org="OVH BE"), rules) == "org_keyword",
+        dm.infrastructure_reason(dict(base, isp="OVH SAS"), rules) is None,
+        "ovh" not in rules["prefixes"] and "ovh" not in dm.load_prefixes(),
+        dm.matches_prefix(norm("Webflow, Inc"), rules["prefixes"]) == "webflow",
+        dm.matches_prefix(norm("Webflow Agency Ltd"), rules["prefixes"]) == "webflow",
+        dm.matches_prefix(norm("Webflowers Florist"), rules["prefixes"]) is None,
+        dm.infrastructure_reason(dict(base, org="Webflow, Inc"), rules) == "org_prefix",
+    ]
+    samples = {
+        "cloud_provider": dict(base, cloud_provider="Oracle Cloud Infrastructure"),
+        "tag_rule": dict(base, tags=["cdn"]),
+        "ip_pattern": dict(base, ip="139.162.5.5"),
+        "org_exact": dict(base, org="Google LLC"),
+        "org_prefix": dict(base, org="Webflow, Inc"),
+        "org_pattern": dict(base, org="139.162.0.0/16"),
+        "org_keyword": dict(base, org="Krystal Hosting Ltd"),
+    }
+    emitted = {key: dm.infrastructure_reason(row, rules) for key, row in samples.items()}
+    out.append(emitted == {key: key for key in samples})
+    out.append(set(emitted.values()) == set(dm.INFRA_REASONS) and len(dm.INFRA_REASONS) == 7)
+    out.append(set(dm.INFRA_REASONS) == {"cloud_provider", "tag_rule", "ip_pattern", "org_exact", "org_prefix", "org_pattern", "org_keyword"})
+    isp_only = dict(base, org="ABTC IMOVEIS LTDA ME", isp="Google LLC")
+    out.append(dm.infrastructure_reason(isp_only, rules) is None)
+    out.append(not any(value.startswith("isp_") for value in emitted.values()))
+    return out
+
+
 def run_tests():
     """Run all matcher cases and return how many passed."""
     kw = ["hosting", "vpn", "internet service provider", "chinanet"]
@@ -158,6 +200,7 @@ def run_tests():
             cases.append(True)
     cases.extend(accent_cases())
     cases.extend(isp_cases())
+    cases.extend(d5_followup_cases())
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)

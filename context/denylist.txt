@@ -1,16 +1,16 @@
 # CyberIntel denylist: EXACT-match list (PROPOSED, not approved). Human approval required before any stage uses it.
 # Format: one name per line. Compare after normalising BOTH sides with scripts/denylist_match.py normalise():
 #   lowercase, punctuation stripped, trailing legal-suffix words removed (inc, llc, ltd, gmbh, ...).
-# Match against org, isp and cloud.provider.
-# Source: first 100,000 records of the raw dump, hand-picked from the most frequent org/isp values, then grouped.
+# Match against the org text only (D5: the isp text is not used by itself). cloud.provider is a separate rule (non-null value), see the D4 block below.
+# Source: first 100,000 records of the raw dump, hand-picked from the most frequent org and isp values (isp values were only a source of names), then grouped.
 # The long tail is covered by context/denylist_prefixes.txt (word-boundary prefix families) and the D4 tag rule below.
 # Related files: denylist_prefixes.txt (prefix rule), denylist_patterns.txt (CIDR/glob rule, not org names),
 #   cert_default_names.txt (default certificate organisations, used for D4 rule 3).
 #
 # D4 INFRASTRUCTURE RULE (docs/ARCHITECTURE.md section 15). A row is infrastructure if ANY of:
-#   1. org, isp or cloud.provider matches this exact list, the prefix list, or the pattern list;
-#   2. cloud.provider is non-null;
-#   3. a "cloud" or "cdn" tag is present.
+#   1. the ORG text matches a denylist rule: this exact list, the prefix list, the pattern list or the keyword list;
+#   2. cloud.provider is non-null, OR a "cloud" or "cdn" tag is present, OR the host IP matches a CIDR in denylist_patterns.txt;
+#   3. the isp text is NOT used by itself (D5, docs/ARCHITECTURE.md section 15); isp matching survives only as isp_matching="exclude" to reproduce old counts.
 # Infrastructure rows never become companies; they are kept in hosts and counted in the D4 report.
 # Removals from this list are not allowed without owner approval (no entry may be weakened).
 # Moved out on 2026-10-11: 139.162.0.0/16, *se5-ptk*, *se3-ptk* are not org names, now in denylist_patterns.txt.
@@ -235,7 +235,7 @@ china united network communications corporation limited
 cantv servicios, venezuela
 beijing cnisp technology co., ltd.
 
-# --- cloud.provider values (field cloud.provider) ---
+# --- cloud provider names (matched on the org text; the cloud.provider FIELD is covered by the non-null rule, D4 rule 2) ---
 google
 amazon
 alibaba cloud

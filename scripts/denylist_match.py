@@ -64,7 +64,7 @@ KEYWORD_FIELDS = ("org", "isp")
 
 
 class Keyword(str):
-    """A normalised keyword phrase (a str) that also carries its field scope: 'any' (org or isp) or 'org' (org text only)."""
+    """A normalised keyword phrase (a str) with a field scope: 'org' (org text only) or 'any' (org text, and isp text only in the old "exclude" mode)."""
 
     scope = "any"
 
@@ -120,7 +120,7 @@ def matches_prefix(normalised, prefixes):
 
 
 def matches_keyword(normalised, keywords, field="org"):
-    """Return the first keyword whose words appear as a whole-word run in the text of `field` ('org' or 'isp'), else None; org-scoped keywords only match field 'org'."""
+    """Return the first keyword whose words appear as a whole-word run in the text of `field` ('org' or 'isp'), else None; org-scoped keywords only match field 'org' (the default pipeline mode never passes 'isp')."""
     if field not in KEYWORD_FIELDS:
         raise ValueError("field must be one of " + ", ".join(KEYWORD_FIELDS))
     padded = " " + normalised + " "
@@ -153,9 +153,13 @@ def matches_pattern(value, patterns):
 
 
 ISP_MATCHING_MODES = ("ignore", "exclude")
-# Evidence-based default (RAW-013, outputs/denylist_cleanup_review.md): only 22 of 50 reviewed orgs excluded purely through their isp text
-# were infrastructure (44%, gate is 90%), so the isp field does NOT exclude a row by itself. Use "exclude" only to reproduce the old behaviour.
+# Decision D5 (docs/ARCHITECTURE.md section 15, RAW-013, outputs/denylist_cleanup_review.md): only 22 of 50 reviewed orgs excluded purely through
+# their isp text were infrastructure (44%, gate is 90%), so the isp text NEVER excludes a row by itself. "ignore" is the default and the only mode
+# for pipeline use. "exclude" exists ONLY to reproduce the old counts (89,398 infrastructure rows on the spread sample); do not use it in a stage.
 DEFAULT_ISP_MATCHING = "ignore"
+# The complete set of infra_reason values that infrastructure_reason() returns in the default mode (D4 rule 2). 2_companies is not built yet; this
+# set is the contract it must follow. The "isp_*" values exist only in the old "exclude" mode.
+INFRA_REASONS = ("cloud_provider", "tag_rule", "ip_pattern", "org_exact", "org_prefix", "org_pattern", "org_keyword")
 
 
 def load_rules(context_dir=None):
@@ -188,7 +192,7 @@ def match_name(value, field, rules):
 
 
 def infrastructure_reason(row, rules, isp_matching=DEFAULT_ISP_MATCHING):
-    """Return why a row is infrastructure (D4 rule), or None; row keys: org, isp, cloud_provider, tags, ip. isp_matching 'ignore' (default) or 'exclude' (old behaviour)."""
+    """Return why a row is infrastructure (D4 rule 2, one of INFRA_REASONS), or None; isp_matching 'ignore' (default, D5) never uses the isp text, 'exclude' only reproduces old counts."""
     if isp_matching not in ISP_MATCHING_MODES:
         raise ValueError("isp_matching must be one of " + ", ".join(ISP_MATCHING_MODES))
     if row.get("cloud_provider"):

@@ -121,6 +121,12 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   85 tests pass). Spread sample: infrastructure 89,398 to 85,747 (89.40% to 85.75%), surviving 10,602 to 14,253, surviving distinct orgs 4,863 to 5,664.
   The D4 wording in ARCHITECTURE.md must change from "org, isp or cloud.provider" to org text only (owner/senior-data-engineer). Details:
   `outputs/denylist_cleanup_review.md`. Item (3) below (Automattic / Tumblr) is done.
+- Update 2026-10-11, branch `feat/data-integrator/d5-wording` (proposed; D5 follow-up decided by senior-data-engineer): (1) wording that still said the isp text is
+  matched was fixed in the denylist files, `context/schema.md` and `scripts/denylist_match.py` (no behaviour change); `isp_matching="exclude"` is documented as
+  reproducing old counts only. (2) `org: ovh` keyword enabled: gate 6/6 (only 6 distinct orgs newly matched; whole word, so OVHTECH is not matched). (3) `webflow`
+  added as a D2 prefix family (10 rows, 1 IP). (4) `INFRA_REASONS` pinned by a test: cloud_provider, tag_rule, ip_pattern, org_exact, org_prefix, org_pattern,
+  org_keyword; `2_companies` is not built yet and must follow it. Spread sample: infrastructure 85,747 to 85,798 (85.80%), surviving 14,253 to 14,202 (14.20%),
+  surviving distinct orgs 5,664 to 5,657; 106 tests pass. Details: `outputs/denylist_cleanup_review.md` section 7.
 - What remains: (1) 18 candidates failed the gate in the first round and are not applied, including communications (78.0%), isp, idc, fiber,
   mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
   but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr added (see the denylist-cleanup update). (4) The rules are not enforced anywhere yet: `check_contract.py` still

@@ -1,11 +1,13 @@
 # CyberIntel denylist KEYWORDS (PROPOSED, not approved). Decisions D2 and D4 in docs/ARCHITECTURE.md section 15; RAW-013.
-# Rule: a keyword matches when its words appear as a whole-word (word-sequence) run anywhere in the NORMALISED org name or the
-# NORMALISED isp name (scripts/denylist_match.py normalise() then matches_keyword()). It is NOT an arbitrary substring match:
+# Rule: a keyword matches when its words appear as a whole-word (word-sequence) run anywhere in the NORMALISED org name
+# (scripts/denylist_match.py normalise() then matches_keyword()). It is NOT an arbitrary substring match:
 # "hosting" matches "Krystal Hosting Ltd" but not "webhosting"; "vpn" does not match "vpnsoft".
+# The isp text is NEVER matched in the default mode (D5, docs/ARCHITECTURE.md section 15): org-scoped and unscoped keywords therefore behave the same
+# way, both on the org text only. The scope only matters if a caller asks for the old isp matching (isp_matching="exclude", kept only to reproduce
+# the old counts); in that mode an unscoped keyword also matches the isp text and an org-scoped one does not.
 # SYNTAX (field scope, RAW-013): one entry per line.
-#   phrase          unscoped: matches in the org text OR the isp text (the original behaviour).
-#   org: phrase     org-scoped: matches in the org text ONLY. Use it where the word is common in CARRIER names (isp text), so that a
-#                   customer sitting behind a telecom carrier is not excluded (for example a company whose isp is "A1 Telekom Austria").
+#   phrase          unscoped: matches the org text (and, only in the old "exclude" mode, the isp text).
+#   org: phrase     org-scoped: matches the org text ONLY, in every mode. Use it for words common in CARRIER names.
 #   Any other scope word (for example "isp:") is rejected with an error. Callers pass field="org" or field="isp" to matches_keyword.
 # This file lists ONLY keywords that PASSED the precision gate: at least 90% of up to 50 reviewed newly-excluded distinct orgs
 # classified INFRA (ISP, telecom, hosting, VPN, data centre, network provider) from the org name text alone, UNSURE counted as REAL.
@@ -37,3 +39,6 @@ org: telefonica
 org: telecoms
 org: telkom
 org: telcom
+# Added 2026-10-11 (D5 follow-up): ovh passed the gate 6/6 (100%; only 6 distinct orgs were newly matched, all reviewed): OVH Singapore, OVH Hispano,
+# OVH (NWK), OVH BE, OVH Australia, Dedicated servers OVH. Whole word only: OVHTECH is NOT matched (no space-delimited "ovh"). Figures: outputs/denylist_cleanup_review.md.
+org: ovh

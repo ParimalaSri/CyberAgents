@@ -112,3 +112,46 @@ other real-looking non-operator company.
 - The review covers 50 of 798 isp-only orgs (57% of their rows).
 - Whether rows with isp Google and a customer org are the customer's own estate or Google Cloud tenancy is not established.
 - The rules are not enforced by `check_contract.py` (RAW-010); `docs/ARCHITECTURE.md` D4 wording was not edited.
+
+## 7. D5 follow-up (branch `feat/data-integrator/d5-wording`, 2026-10-11)
+Decided by senior-data-engineer under the owner's delegation; the owner may overrule. Same spread sample, read only.
+
+### 7.1 Wording
+`DEFAULT_ISP_MATCHING` stays `"ignore"`; `"exclude"` is documented in code as reproducing the old counts only. Text that still said the isp is matched was
+fixed (wording only, no behaviour change) in `context/denylist.txt`, `context/denylist_prefixes.txt`, `context/denylist_patterns.txt`,
+`context/denylist_keywords.txt`, `context/schema.md` and the comments and docstrings of `scripts/denylist_match.py`. `docs/ARCHITECTURE.md` and
+`check_contract.py` were not edited.
+
+### 7.2 Gate: org-scoped keyword `ovh`
+Newly matched set (rows surviving every other rule whose normalised org contains the whole word `ovh`): 41 rows, only 6 distinct orgs, so all 6 were reviewed
+(fewer than 50 exist). Names only, UNSURE counted REAL: OVH Singapore PTE. LTD 17, OVH Hispano 9, OVH (NWK) 6, OVH BE 5, OVH Australia PTY LTD 2, Dedicated
+servers OVH 2. All 6 INFRA, 0 REAL or UNSURE: 6/6 = 100%, gate (90%) PASSED. Caveat: n=6, one reviewer, no external lookup.
+Added as `org: ovh`. Whole-word check: `OVHTECH R&D (INDIA) PRIVATE LIMITED` (7 rows) is NOT matched, and neither are `Hovhannes Consulting` or `Novhost Media`;
+the isp text `OVH Singapore` does not match. So OVHTECH stays surviving; a name-based rule for it would need a prefix `ovhtech`, which was not asked for or gated.
+`ovh` is not added to the prefix list (under 4 characters).
+
+### 7.3 Webflow
+`webflow` added to `context/denylist_prefixes.txt` as a D2 website-builder family (like weebly, jimdo, automattic, tumblr). Sample: org `Webflow, Inc`, 10 rows,
+1 IP, no tags, no `cloud.provider`, previously surviving; 0 isp rows. Prefix family now 45 entries (40 owner-accepted plus 5 builders).
+Tests: `Webflow, Inc` and `Webflow Agency Ltd` match; `Webflowers Florist` does not.
+
+### 7.4 infra_reason value set
+`infrastructure_reason()` returns exactly: cloud_provider, tag_rule, ip_pattern, org_exact, org_prefix, org_pattern, org_keyword (plus isp_* values only in the old
+`"exclude"` mode, never in the default). `2_companies` is not built yet, so this set (`INFRA_REASONS` in `scripts/denylist_match.py`, pinned by a test) is the
+contract it must follow. 106 test cases pass (85 before, 21 new).
+
+### 7.5 Before and after (spread sample, 100,000 rows)
+| state | infrastructure | surviving | surviving distinct orgs |
+|---|---|---|---|
+| A: senior baseline (reproduced exactly) | 85,747 (85.75%) | 14,253 (14.25%) | 5,664 |
+| B: + ovh | 85,788 | 14,212 | 5,658 |
+| C: + webflow (final) | 85,798 (85.80%) | 14,202 (14.20%) | 5,657 |
+
+Reason mix final: cloud_provider 40,537; tag_rule 22,000; org_exact 21,215; org_keyword 1,809 (was 1,768); org_prefix 174 (was 164); org_pattern 63.
+Urgency rows (all rows / surviving A / surviving C): has vulns 3,076 / 1,026 / 1,025; KEV 1,807 / 608 / 607; cert expired 598 / 220 / 219; eol tag 1,582 / 476 / 475;
+legacy TLS 1,268 / 221 / 221; risky port (20-port list) 3,335 / 1,110 / 1,104. Surviving share of vulns: 33.4% to 33.3%. Honeypot/c2/tor/compromised survivors 36 to 35.
+The 51 rows moved (41 ovh, 10 webflow) carry vulns 1, KEV 1, cert expired 1, eol 1, legacy TLS 0, risky port 6. No row moved the other way.
+
+### 7.6 Not verified
+Names only, single reviewer, 100K spread sample only, not the full file. The `ovh` gate rests on 6 orgs. Other OVH spellings that may exist in the full file
+(OVHTECH and one-word compounds) are not covered. `check_contract.py` still applies none of the prefix, pattern or keyword rules (RAW-010).

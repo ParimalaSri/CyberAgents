@@ -18,7 +18,7 @@ Struct fields are addressed as `ssl.cert.expires` etc. Null % for nested fields 
 | transport | VARCHAR | 0 | tcp 98.82%, udp 1.18% | ignore |
 | timestamp | VARCHAR | 0 | ISO scan time; whole sample spans 2026-09-14 09:54 to 11:05 (about 71 min) | urgency (weak here) |
 | org | VARCHAR | 0.20 | registered owner of the IP block; 6,579 distinct; mostly hosting/cloud/CDN | entity, fit |
-| isp | VARCHAR | 8.72 | ISP/provider; null exactly when asn is null | entity (denylist) |
+| isp | VARCHAR | 8.72 | ISP/upstream network; null exactly when asn is null; NOT matched against the denylist by itself (D5) | entity (evidence only) |
 | asn | VARCHAR | 8.72 | autonomous system `AS<n>`; 4,240 distinct | entity (secondary) |
 | product | VARCHAR | 80.62 | detected software (nginx, Apache httpd, OpenSSH ...) | fit, urgency |
 | version | VARCHAR | 93.63 | free-text version of product; 16 empty strings | urgency |
@@ -69,6 +69,6 @@ No single-column key. Proposed row key: (coalesce(ip_str, ipv6), port, transport
 - Majority of rows belong to infrastructure owners: 83.8% of rows have an org on the denylist (exact + prefix + pattern); 87.6% of rows are infrastructure by the D4 rule (head sample: 87.4% and 90.6%).
 
 ## Denylist candidates
-- Proposed in `context/denylist.txt` (222 exact entries), `context/denylist_prefixes.txt` (40 prefix families), `context/denylist_patterns.txt` (3 patterns) and `context/cert_default_names.txt` (57 default cert O values). Rule definitions are in the file headers; matcher in `scripts/denylist_match.py`. Original list was 225 entries, exact lowercase match on org, isp or cloud.provider. Top: google llc,
+- Proposed in `context/denylist.txt` (222 exact entries), `context/denylist_prefixes.txt` (45 prefix families: the 40 the owner accepted plus 5 website builders), `context/denylist_keywords.txt` (whole-word keywords, org text), `context/denylist_patterns.txt` (3 patterns) and `context/cert_default_names.txt` (57 default cert O values). Rule definitions are in the file headers; matcher in `scripts/denylist_match.py`. Original list was 225 entries, exact lowercase match on org, isp or cloud.provider; since D5 the rules match the org text only (cloud.provider non-null, cloud/cdn tags and the IP CIDR rule are separate). Top: google llc,
   incapsula inc, amazon.com, inc., aliyun computing co., ltd, cloudflare, inc., aceville pte.ltd., internet rimon, korea telecom.
 - Not approved; the long tail needs rule-based matching (cloud/cdn tags, name patterns).

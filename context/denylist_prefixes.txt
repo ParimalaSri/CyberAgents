@@ -1,12 +1,13 @@
 # CyberIntel denylist PREFIX families (PROPOSED, not approved; decisions D1, D2, D4 in docs/ARCHITECTURE.md section 15).
 # Owner accepted these 40 families as listed on 2026-10-11.
-# Four website-builder families (weebly, jimdo, automattic, tumblr) were added after that on the same date under decision D2 (website
-# builders are infrastructure; owner-approved for automattic = WordPress.com and tumblr); they are not part of the 40 the owner accepted.
-# weebly and jimdo are listed in outputs/denylist_keyword_review.md; automattic and tumblr in outputs/denylist_cleanup_review.md.
+# Five website-builder families (weebly, jimdo, automattic, tumblr, webflow) were added after that on the same date under decision D2 (website
+# builders are infrastructure; owner-approved for automattic = WordPress.com and tumblr; webflow decided by senior-data-engineer under the approved D2,
+# D5 follow-up); they are not part of the 40 the owner accepted.
+# weebly and jimdo are listed in outputs/denylist_keyword_review.md; automattic, tumblr and webflow in outputs/denylist_cleanup_review.md.
 # Rule: a name matches when its NORMALISED form equals the entry or starts with the entry followed by a space
 # (word-boundary prefix). Normalise with scripts/denylist_match.py normalise(): lowercase, punctuation stripped,
 # trailing legal-suffix words removed. Example: "Palo Alto Networks, Inc." -> "palo alto networks" matches "palo alto".
-# Applies to org, isp and cloud.provider. Entries are already in normalised form.
+# Applies to the org text only (D5: the isp text is not matched in the default mode). Entries are already in normalised form.
 # Entries under 4 characters are NOT allowed here (exact-only in denylist.txt): ace, wix, ibm, ovh, aws, gtt.
 # Each family must be checked against distinct orgs before use (outputs/profile_spread_100k.md lists prefix-only hits).
 
@@ -50,6 +51,7 @@ weebly
 jimdo
 automattic
 tumblr
+webflow
 vercel
 bitly
 godaddy
