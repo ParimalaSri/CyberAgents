@@ -65,13 +65,21 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Contract rule: none.
 
 ## RAW-010 DQ denylist check only understands the exact list
-- Symptom: `.claude/skills/data-quality-check/scripts/check_contract.py` `check_denylist` reads one list from the contract and
-  compares names; it has no word-boundary prefix rule, no pattern rule (CIDR/glob) and no normaliser (read from source, not run).
-  The denylist now has four files (exact, prefixes, patterns, cert defaults).
-- Root cause: the check was written for a single exact list.
-- Fix idea: data-quality-engineer extends the check to call `scripts/denylist_match.py` (normalise, load_exact, load_prefixes, matches_pattern).
-  Not edited by data-integrator (file is not in its write scope).
-- Contract rule: companies.company_name_normalised must match none of the four rule types.
+- Status: CLOSED on branch `feat/data-quality/contract-matcher` (2026-10-11).
+- Symptom: `.claude/skills/data-quality-check/scripts/check_contract.py` `check_denylist` read one list from the contract and compared
+  `lower(trim(name))`; it had no word-boundary prefix rule, no pattern rule (CIDR/glob), no keyword rule and no accent or punctuation normaliser.
+  Measured on the 6,579 distinct non-null orgs of `data/sample/spread_100k.jsonl`: the old logic flagged 205; the shared rules flag 897.
+- Root cause: the check was written for a single exact list and re-implemented matching instead of using the pipeline's matcher, so the checker and
+  the pipeline could disagree.
+- Fix: `check_denylist` now imports `scripts/denylist_match.py` (path derived from the script location, works from any directory). New contract
+  form `denylist: {column, rules: shared}` applies exact, prefix, pattern and keyword rules on the org text only (D5) and reports up to 5 examples with
+  the rule type; the old `{column, file}` form still works but normalises both sides with `normalise()` (205 to 241 on the same orgs). A missing matcher or rule file
+  FAILS with a message. Also added: `infra_reason` value check (must be in `INFRA_REASONS`, `isp_*` fails) and a generic `shares` check (D4 share rules).
+  20 tests in `test_check_contract.py`; report `outputs/dq/checker_upgrade_2026-10-11.md`.
+- Contract rule now catching it: `denylist: {column: company_name, rules: shared}` in the companies contract (any value matching any of the four
+  rule types fails); `infra_reason: {}` on hosts. Not yet wired into `context/contracts/*.yml` because no layer contract exists yet.
+- Residual: the keyword rules are applied as the pipeline applies them; some matched orgs look like real ISPs/hosts by name only (see report), that is the
+  gate decision in RAW-013, not a checker bug.
 
 ## RAW-011 Raw column set differs between samples
 - Symptom: head sample has 78 top-level columns, spread sample 85. 14 columns only in the spread sample (microsoft_exchange, openflow,
@@ -129,8 +137,7 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   surviving distinct orgs 5,664 to 5,657; 106 tests pass. Details: `outputs/denylist_cleanup_review.md` section 7.
 - What remains: (1) 18 candidates failed the gate in the first round and are not applied, including communications (78.0%), isp, idc, fiber,
   mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
-  but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr added (see the denylist-cleanup update). (4) The rules are not enforced anywhere yet: `check_contract.py` still
-  understands only the exact list (RAW-010) and does not apply prefix, pattern or keyword rules. (5) Not yet run on the full file.
+  but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr added (see the denylist-cleanup update). (4) The checker now enforces the shared rules (RAW-010 closed); `2_companies` is not built yet. (5) Not yet run on the full file.
 - Contract rule: companies row share outside 5-20% flagged (already planned); keyword-leakage check once `check_contract.py` calls `matches_keyword`.
 
 ## RAW-014 Expectations in D3/section 10 not reproduced on the spread sample
