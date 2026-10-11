@@ -1,0 +1,242 @@
+# CyberIntel denylist candidates (PROPOSED, not approved).
+# One lowercase name per line. Match case-insensitively on org, isp, or cloud.provider.
+# Source: first 100,000 records of the raw dump (data/raw/sample_100k.jsonl); selected by hand from the
+# most frequent org/isp values, then grouped. Exact-match values only; the long tail (>5,000 distinct orgs)
+# is NOT covered and needs rule-based matching (see outputs/profile_sample_100k.md).
+# Human approval required before any pipeline stage uses this file.
+
+
+# --- hyperscaler / public cloud ---
+google llc
+google asia pacific pte. ltd.
+amazon.com, inc.
+amazon technologies inc.
+amazon data services nova
+amazon data services japan
+amazon data services ireland limited
+amazon data services singapore
+amazon data services uk
+amazon data services canada
+amazon data services india
+amazon data services hong kong
+amazon data services sweden
+amazon data services brazil
+amazon data services switzerland
+amazon corporate services pty ltd
+aws asia pacific (seoul) region
+microsoft corporation
+microsoft limited
+microsoft limited uk
+aliyun computing co., ltd
+aliyun computing co.ltd
+alibaba cloud - hk
+alibaba cloud llc
+alibaba cloud - us
+alibaba cloud - sg
+alibaba cloud (singapore) private limited
+hangzhou alibaba advertising co.,ltd.
+alibaba (us) technology co., ltd.
+tencent cloud computing (beijing) co., ltd
+tencent cloud computing (beijing) co., ltd.
+shenzhen tencent computer systems company limited
+huawei public cloud service (huawei software technologies ltd.co)
+huawei cloud service data center
+huawei clouds
+oracle corporation
+oracle public cloud
+ibm
+ibm cloud
+softlayer technologies, inc.
+digitalocean, llc
+digital ocean, inc.
+linode
+linode, llc
+akamai connected cloud
+vultr holdings, llc
+the constant company, llc
+dimension data
+
+# --- CDN / edge / security proxy ---
+incapsula inc
+incapsula inc.
+incapsula network
+imperva inc
+imperva ltd.
+cloudflare, inc.
+cloudflare london, llc
+akamai technologies, inc.
+akamai technologies
+akamai international b.v.
+akamai international, bv
+fastly, inc.
+cdnetworks
+cdnetworks inc.
+cdnetworks inc
+zscaler, inc.
+zscaler switzerland gmbh
+zscaler softech india private limited
+zscaler australia pty ltd
+edgenext legend dynasty pte.ltd
+edgenext legend dynasty pte. ltd.
+palo alto networks, inc
+
+# --- hosting / VPS / website builders ---
+hetzner online gmbh
+ovh sas
+ovh sp. z o. o.
+ovh gmbh
+ovh hosting, inc.
+ovh ltd
+ovh us llc
+scaleway
+scaleway s.a.s.
+scaleway - amsterdam, netherlands
+scaleway dedibox - paris, france
+scaleway - paris, france
+scaleway fr-par-1
+online sas nl
+ionos se
+contabo gmbh
+fly.io, inc.
+fly.io, inc
+a100 row gmbh
+a100 row inc
+aceville pte.ltd.
+ace
+meteverse limited
+meteverse limited.
+unified layer
+godaddy.com, llc
+hostinger international limited
+hostgator.com llc
+hostpapa
+inmotion hosting, inc.
+netcup gmbh
+sakura internet inc.
+datacamp limited
+gmo internet group, inc.
+gmo pepabo, inc.
+a2 hosting, inc.
+pair networks
+namecheap, inc.
+newfold digital, inc.
+hostwinds seattle
+sedo gmbh
+squarespace, inc.
+wix.com ltd.
+wpengine, inc.
+pantheon
+vercel, inc
+shopify, inc.
+prosites, inc.
+netsec limited
+octopus web solution inc
+zenlayer inc
+m247 europe srl
+internet utilities europe and asia limited
+internet utilities na llc
+strong technology, llc.
+cencom inc
+peg tech inc
+bitly inc
+139.162.0.0/16
+*se5-ptk*
+*se3-ptk*
+network solutions, llc
+server mania inc.
+liquid web, l.l.c
+upcloud chicago inc
+xserver inc.
+host europe gmbh
+pressable
+rapidseedbox ltd
+
+# --- ISP / telecom / carrier (consumer or transit) ---
+internet rimon
+internet rimon ltd
+korea telecom
+uzbektelekom joint stock company
+"uzbektelekom" joint stock company
+level 3 parent, llc
+cogent communications
+gtt
+gtt communications inc.
+centurylink communications, llc
+verizon business
+comcast cable communications, llc
+charter communications inc
+charter communications llc
+at&t enterprises, llc
+t-mobile usa, inc.
+sky uk limited
+bt infrastructure layer
+bt-central-plus
+british telecommunications plc
+deutsche telekom ag
+sunrise gmbh
+telecom italia s.p.a.
+telecom argentina s.a.
+telmex colombia s.a.
+saudi telecom company jsc
+turk telekomunikasyon anonim sirketi
+andorra telecom
+andorra telecom, s.a.u.
+chunghwa telecom co.,ltd.
+china mobile communications corporation
+china mobile communications group co., ltd.
+chinanet-backbone
+china unicom china169 backbone
+china telecom (group)
+viettel group
+vnpt corp
+vietnam posts and telecommunications group
+fpt telecom company
+sk broadband co ltd
+jsc ukrtelecom
+jsc "ukrtelecom"
+frontier communications of america, inc.
+bezeq international ltd.
+ee limited
+so-net service
+sony network communications inc.
+reliance jio infocomm limited
+globenet cabos submarinos america inc.
+uninet
+v tal
+ntt communications corporation
+true broadband
+true online
+scancom limited
+cellnet innovations, inc.
+open computer network
+data communication business group
+hurricane electric
+asia pacific network information center, pty. ltd.
+asia pacific network information centre
+cox communications inc.
+windstream communications llc
+virgin media limited
+orange s.a.
+orange wbc broadband
+vodafone italia s.p.a.
+kpn b.v.
+bell canada
+videotron ltee
+telefonica brasil s.a
+hong kong broadband network ltd
+hgc global communications limited
+china united network communications corporation limited
+cantv servicios, venezuela
+beijing cnisp technology co., ltd.
+
+# --- cloud.provider values (field cloud.provider) ---
+google
+amazon
+alibaba cloud
+azure
+vultr
+digitalocean
+tencent cloud
+oracle cloud infrastructure
+rackspace
+exoscale
