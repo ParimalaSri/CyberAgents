@@ -1,4 +1,4 @@
-"""Independent accounts-layer checks: recompute fit, urgency, contact, bands (D11.2 top-N), caps and top_signals from signals (D9.6 to D9.9, D10, D11), why phrases, sort order."""
+"""Independent accounts-layer checks: recompute fit, urgency, contact, bands (D11.2 top-N, D12.1 tie order), caps, top_signals with the 40-word fallback, skip clause (D12.2) from signals (D9.6 to D9.9, D10 to D12), why phrases, sort order."""
 import argparse
 import re
 import sys
@@ -28,9 +28,12 @@ NOISE_MIN_HOSTS, NOISE_MIN_SHARE = 2, 0.5  # D9.3, decided
 WHY_MAX_WORDS = 40  # D9.6 item 7 and D9.8
 CLAUSE = "Not yet checked that this is an end-user organisation, not a network operator."  # D10
 SKIP_CLAUSE = "Below the review cut-off."  # D11.3 replaces "Exposure is limited."
+SKIP_CLAUSE_SIGNAL = "Ranked below this run's review list; a rank, not a judgement of risk."  # D12.2: skip rows whose kept top_signals include a KEV or CVSS signal
+SKIP_SIGNAL_NAMES = ("kev_exposed", "max_cvss_band")  # D12.2
+EXPOSED_PHRASE = "an exposed admin or database service ({ports}) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability"  # D12.3
 OPERATOR_CLAUSE = "Name looks like a network operator."  # D9.6 item 7, D11.3 (any review row with the operator name shape)
 OLD_WORDING = ("Exposure is limited", "with a vulnerability on the CISA known-exploited list", "worst vulnerability scores", "located in", "based in", "is vulnerable",
-               "known-exploited host", "has been exploited")  # pre-D11 phrases and the words D11.3 and D11.5 forbid
+               "known-exploited host", "has been exploited", "on outdated software")  # pre-D11 phrases and the words D11.3 and D11.5 forbid
 CAP_ORDER = ("low_confidence", "operator_name_shape", "operator_unverified", "singleton")  # alphabetical, the contract rule (DQ-012)
 BANDS = ("contact", "review", "skip", "exclude")
 FORBIDDEN_WORDS = ("breach", "compromised", "hacked")  # D9.9 rule 3
@@ -39,22 +42,26 @@ CATEGORY_RANK = {"vulnerability": 0, "exposure": 1, "hygiene": 2, "fit": 3}  # D
 ACCOUNT_COLUMNS = ("account_id", "company_name", "country_code", "host_count", "identity_source", "identity_confidence", "fit_score", "urgency_score",
                    "contact_score", "top_signals", "band_uncapped", "cap_reasons", "band", "why", "decision", "prompt_version", "final_band")
 SIGNAL_COLUMNS = ("company_id", "company_name", "country_code", "host_count", "distinct_host_ips", "identity_source", "identity_confidence", "noise_host_count",
-                  "noise_host_share", "is_singleton", "in_territory", "footprint_band", "sensitive_stack", "operator_shape_t1", "operator_shape_t2",
+                  "noise_host_share", "is_singleton", "in_territory", "footprint_band", "sensitive_stack", "operator_shape_t1", "operator_shape_t2", "operator_name_shape",
                   "kev_exposed", "kev_host_count", "max_cvss", "max_cvss_band", "cert_expired_or_soon", "cert_issue_host_count", "eol_stack", "eol_host_count",
                   "legacy_tls", "legacy_tls_host_count", "risky_service_exposed", "risky_non_ssh_exposed", "risky_service_host_count", "risky_ports",
                   "exposed_and_outdated")
 # The numbers the stage author reported after D11 (accounts_stage_2026-10-11.md and the hand-off), compared with my own recomputation.
 AUTHOR = {"rows": 5790, "contact": 0, "review": 200, "skip": 5589, "exclude": 1, "would_be_contacts": 51, "urgency_above_0": 1324, "fit_above_0": 1190,
-          "max_fit": 65, "cut_score": 30, "tie_size": 142, "tie_kept": 7, "tie_to_skip": 135, "accounts_above_cut": 193, "top_n_only": 149, "review_operator_shaped": 42,
-          "review_operator_via_cap": 5, "review_operator_via_top_n": 37, "skip_urgency_above_0": 1123, "skip_below_floor": 659, "skip_below_floor_non_ssh": 42,
-          "skip_below_floor_cvss7": 32, "skip_below_floor_overlap": 0, "skip_below_floor_union": 74, "skip_beyond_cut": 464, "longest_why_words": 37,
-          "union_fit_lost": 66, "union_contact_changed": 29,
+          "max_fit": 65, "cut_score": 30, "tie_size": 142, "tie_kept": 7, "tie_to_skip": 135, "accounts_above_cut": 193, "top_n_only": 149, "review_operator_shaped": 35,
+          "review_operator_via_cap": 5, "review_operator_via_top_n": 30, "review_singletons": 27, "review_low_confidence": 8, "skip_urgency_above_0": 1123,
+          "skip_below_floor": 659, "skip_below_floor_non_ssh": 42, "skip_below_floor_cvss7": 32, "skip_below_floor_overlap": 0, "skip_below_floor_union": 74,
+          "skip_beyond_cut": 464, "skip_signal_clause": 537, "skip_signal_clause_kev": 303, "skip_signal_clause_cvss": 234, "skip_signal_clause_at_or_above_floor": 455,
+          "skip_signal_clause_below_floor": 82, "skip_plain_clause": 586, "exposure_phrase_accounts": 40, "longest_why_words": 40, "longest_skip_why_words": 33,
+          "union_fit_lost": 66, "union_contact_changed": 29, "kept_tied_flagged": 0, "review_operator_shaped_d11": 42,
           "cap_sets": {"operator_unverified": 46, "operator_name_shape,operator_unverified": 4, "operator_name_shape,operator_unverified,singleton": 1}}
+AUTHOR_KEPT = ("Alta Gracia Project Holding Ltd", "Provider Ktechnology", "Brainoza OU", "SugarHosts", "Seiko Electric Co.,Ltd.", "Free Way Tecnologia", "Owl Limited")
+AUTHOR_LEFT = ("GCI Network Solutions", "NTT PC Communications", "Ziply Fiber", "CSLOXINFO-IDC", "Zen Internet", "The Infrastructure Group", "Zillion Network")
 # Phrase table, written from D9.6 item 7 (the wording the stage uses is matched here by pattern; the signal each phrase names must be true).
 PHRASES = (
     ("kev_exposed", re.compile(r"(\d+) hosts? running software whose version matches the CISA known-exploited list", re.I)),  # D11.3, RAW-006
     ("max_cvss_band", re.compile(r"worst version-matched vulnerability scores CVSS (\d+(?:\.\d+)?)", re.I)),  # D11.3, RAW-006
-    ("exposed_and_outdated", re.compile(r"an exposed admin or database service \(([^)]*)\) on outdated software", re.I)),
+    ("exposed_and_outdated", re.compile(r"an exposed admin or database service \(([^)]*)\) on software that is end-of-life or whose version matches a CVSS 7\+ vulnerability", re.I)),  # D12.3
     ("risky_non_ssh_exposed", re.compile(r"remote-admin or database services exposed \(([^)]*)\)", re.I)),
     ("risky_service_exposed", re.compile(r"SSH \(port 22\) open to the internet", re.I)),
     ("eol_stack", re.compile(r"(\d+) hosts? on end-of-life software", re.I)),
@@ -144,14 +151,20 @@ def reference_account(sig, union=True):
 
 
 def rank_order(ref, sig):
-    """Return the D9.6 item 8 total order key of one account: contact_score desc, urgency_score desc, host_count desc, account_id asc."""
+    """Return the D12.1 total order key: contact_score desc, urgency_score desc, operator_name_shape asc (false first), coalesce(kev_host_count, 0) desc, host_count desc, account_id asc."""
+    return (-ref["contact_score"], -ref["urgency_score"], bool(sig["operator_name_shape"]), -(sig["kev_host_count"] or 0), -sig["host_count"], sig["company_id"])
+
+
+def rank_order_d11(ref, sig):
+    """Return the pre-D12 order key (contact_score, urgency_score, host_count desc, account_id), kept only to measure what D12.1 moved."""
     return (-ref["contact_score"], -ref["urgency_score"], -sig["host_count"], sig["company_id"])
 
 
-def review_selection(refs, sigs, review_n=REVIEW_N, floor=REVIEW_MIN):
+def review_selection(refs, sigs, review_n=REVIEW_N, floor=REVIEW_MIN, order=None):
     """Return (review ids, cut stats) by the D11.2 rule: every would-be contact plus the best non-excluded others by the total order until review_n, floor contact_score >= floor."""
     would = {cid for cid, r in refs.items() if r["band_uncapped"] == "contact"}
-    ranked = sorted((cid for cid, r in refs.items() if r["band_uncapped"] != "exclude"), key=lambda cid: rank_order(refs[cid], sigs[cid]))
+    order = order or rank_order
+    ranked = sorted((cid for cid, r in refs.items() if r["band_uncapped"] != "exclude"), key=lambda cid: order(refs[cid], sigs[cid]))
     eligible = [cid for cid in ranked if cid not in would and refs[cid]["contact_score"] >= floor]
     chosen = eligible[:max(0, review_n - len(would))]
     cut = refs[chosen[-1]]["contact_score"] if chosen else None
@@ -159,17 +172,50 @@ def review_selection(refs, sigs, review_n=REVIEW_N, floor=REVIEW_MIN):
     kept = [cid for cid in chosen if refs[cid]["contact_score"] == cut]
     stats = {"would_be_contacts": len(would), "top_n_only": len(chosen), "cut_score": cut, "tie_size": len(tied), "tie_kept": len(kept),
              "tie_to_skip": len(tied) - len(kept), "accounts_above_cut": sum(1 for cid in ranked if cut is not None and refs[cid]["contact_score"] > cut),
-             "kept_tied_ids": sorted(kept), "beyond_cut": len(eligible) - len(chosen)}
+             "kept_tied_ids": sorted(kept), "beyond_cut": len(eligible) - len(chosen), "tied_ids": tied, "kept_ids": kept}
     return would | set(chosen), stats
 
 
+def phrase_words(name, sig):
+    """Return the word count of the why phrase of one signal (D9.6 item 7, D11.3, D12.3); a risky port is written as a one-word label and its number, two words."""
+    shown = list(sig["risky_ports"] or [])
+    ports_all, ports_no_ssh = min(2, len(shown)), min(2, sum(1 for p in shown if p != 22))  # at most two ports are named; the non-SSH phrase leaves port 22 out (observed in the output, measured by this recount)
+    return {"kev_exposed": 11, "max_cvss_band": 6, "exposed_and_outdated": 19 + 2 * ports_all, "risky_non_ssh_exposed": 5 + 2 * ports_no_ssh, "risky_service_exposed": 7,
+            "eol_stack": 5, "cert_expired_or_soon": 7, "legacy_tls": 7, "footprint_band": 5, "sensitive_stack": 8}[name]
+
+
+def expected_words(names, sig, ref, band):
+    """Return the word count of the why for the given top_signals: phrases plus the one cap or operator clause, the D10 clause, or the skip clause (D12.2) for the kept signals."""
+    total = sum(phrase_words(n, sig) for n in names)
+    if ref["band_uncapped"] == "contact":
+        caps = (ref["cap_reasons"] or "").split(",")
+        clause = next((text for reason, text in CAP_CLAUSES if reason in caps), None)
+        return total + (len(clause.split()) if clause else 0) + len(CLAUSE.split())
+    if band == "review":
+        return total + (len(OPERATOR_CLAUSE.split()) if sig["operator_name_shape"] else 0)
+    if band == "skip":
+        return total + len((SKIP_CLAUSE_SIGNAL if any(n in SKIP_SIGNAL_NAMES for n in names) else SKIP_CLAUSE).split())
+    return total
+
+
+def apply_fallback(ref, sig):
+    """Apply the one-signal fallback (D9.6 item 7, D12.3): when the why with two signals passes 40 words only the first signal is kept; return True when it was applied."""
+    two = ref["top_signals"]
+    if not two or len(two) < 2 or expected_words(two, sig, ref, ref["band"]) <= WHY_MAX_WORDS:
+        return False
+    ref["top_signals"] = two[:1]
+    return True
+
+
 def reference_all(signal_rows, review_n=REVIEW_N):
-    """Recompute every account (scores, caps, top_signals and the final band after the D11.2 top-N rule); return (refs by id, cut stats)."""
+    """Recompute every account (scores, caps, final band after the D11.2 top-N rule and D12.1 order, top_signals after the 40-word fallback); return (refs by id, cut stats)."""
     sigs = {s["company_id"]: s for s in signal_rows}
     refs = {cid: reference_account(s) for cid, s in sigs.items()}
     review, stats = review_selection(refs, sigs, review_n)
     for cid, ref in refs.items():
         ref["band"] = "exclude" if ref["band_uncapped"] == "exclude" else "review" if cid in review else "skip"
+        ref["top_before_fallback"] = ref["top_signals"]
+        ref["fallback"] = apply_fallback(ref, sigs[cid])
     return refs, stats
 
 
@@ -189,11 +235,10 @@ def compare_reference(account_rows, signal_rows, review_n=REVIEW_N):
                 examples.setdefault(column, (acc["company_name"], acc[column], ref[column]))
         actual = acc["top_signals"].split(",") if acc["top_signals"] else None
         if actual != ref["top_signals"]:
-            if actual and ref["top_signals"] and actual == ref["top_signals"][:1] and acc["band_uncapped"] == "contact":
-                fallback.append(aid)  # the stage keeps the D10 clause and drops the second signal when the why would pass 40 words (author note)
-            else:
-                diffs["top_signals"] += 1
-                examples.setdefault("top_signals", (acc["company_name"], acc["top_signals"], ref["top_signals"]))
+            diffs["top_signals"] += 1
+            examples.setdefault("top_signals", (acc["company_name"], acc["top_signals"], ref["top_signals"]))
+        elif ref["fallback"]:
+            fallback.append(aid)  # both agree that the second signal was dropped for the 40-word limit
     return sorted(set(sigs) - set(seen)), sorted(set(seen) - set(sigs)), diffs, examples, fallback
 
 
@@ -211,10 +256,11 @@ def check_ids_and_rows(account_rows, signal_rows, company_rows, results):
 def check_recompute(account_rows, signal_rows, results, review_n=REVIEW_N):
     """Check fit, urgency, contact, band_uncapped, cap_reasons, band (D11.2 top-N) and top_signals equal the independent recomputation on every account."""
     missing, extra, diffs, examples, fallback = compare_reference(account_rows, signal_rows, review_n)
-    total = sum(diffs.values()) + len(missing) + len(extra)
+    union_gap = sum(1 for s in signal_rows if bool(s["operator_name_shape"]) != bool(s["operator_shape_t1"] or s["operator_shape_t2"]))
+    total = sum(diffs.values()) + len(missing) + len(extra) + union_gap
     results.append(("independent recompute of fit, urgency, contact, band_uncapped, cap_reasons, band, top_signals from signals: 0 disagreements", total == 0,
                     f"{len(account_rows):,} accounts; missing {len(missing)}, extra {len(extra)}; column disagreements {dict(diffs) or 'none'}; examples {list(examples.items())[:3]}; "
-                    f"one-signal fallback on {len(fallback)} would-be contacts (tolerated: second signal dropped for the 40-word limit)"))
+                    f"one-signal fallback applied on {len(fallback)} accounts and equal to my recomputation (two-signal why over 40 words); operator_name_shape differs from T1 or T2 on {union_gap} signal rows"))
 
 
 def words(text):
@@ -239,8 +285,8 @@ def parse_why(text, sig, account):
     return [n for _, n in sorted(found)], problems, rest
 
 
-def check_why_row(account, sig):
-    """Return the list of problems with one why: words, forbidden words, D10 clause, skip clause, operator clause, phrases true in signals, nothing unrecognised."""
+def check_why_row(account, sig, ref=None):
+    """Return the list of problems with one why: words, forbidden words, D10 clause, skip clause (D12.2), operator clause, phrases true in signals, word recount, nothing unrecognised."""
     why, problems = account["why"], []
     if why is None or not why.strip():
         return ["why is null or empty"]
@@ -288,27 +334,34 @@ def check_why_row(account, sig):
         if text in body and not body.endswith(text):
             problems.append(f"clause {text!r} is not the last sentence before the D10 clause")
         rest = rest.replace(text, "")
-    if SKIP_CLAUSE in rest:
-        rest = rest.replace(SKIP_CLAUSE, "")
-        if account["band"] != "skip":
-            problems.append(f"{SKIP_CLAUSE!r} on an account that is not skip")
-        elif not body.endswith(SKIP_CLAUSE):
-            problems.append(f"{SKIP_CLAUSE!r} is not the last sentence of a skip why")
-    elif account["band"] == "skip":
-        problems.append(f"skip account with urgency above 0 lacks {SKIP_CLAUSE!r} (D11.3)")
+    wanted = SKIP_CLAUSE_SIGNAL if any(n in SKIP_SIGNAL_NAMES for n in expected) else SKIP_CLAUSE  # D12.2, on the signals actually kept
+    for clause in (SKIP_CLAUSE, SKIP_CLAUSE_SIGNAL):
+        if clause in rest:
+            rest = rest.replace(clause, "")
+            if account["band"] != "skip":
+                problems.append(f"{clause!r} on an account that is not skip")
+            elif clause != wanted:
+                problems.append(f"wrong skip clause {clause!r}: kept signals {expected} need {wanted!r} (D12.2)")
+            elif not body.endswith(clause):
+                problems.append(f"{clause!r} is not the last sentence of a skip why")
+    if account["band"] == "skip" and wanted not in body:
+        problems.append(f"skip account with urgency above 0 lacks {wanted!r} (D11.3, D12.2)")
+    if ref is not None and not problems and len(words(why)) != expected_words(expected, sig, ref, account["band"]):
+        problems.append(f"why has {len(words(why))} words, my recount of its phrases and clauses is {expected_words(expected, sig, ref, account['band'])}")
     if re.sub(r"[;.\s]", "", rest):
         problems.append(f"unrecognised text in why: {rest.strip()!r}")
     return problems
 
 
-def check_why(account_rows, signal_rows, results):
+def check_why(account_rows, signal_rows, results, review_n=REVIEW_N):
     """Run the why checks on every account (a superset of the top 25 and a random 200); report counts per problem type."""
     sigs = {s["company_id"]: s for s in signal_rows}
+    refs, _stats = reference_all(signal_rows, review_n)
     kinds, examples = Counter(), {}
     for acc in account_rows:
         if acc["account_id"] not in sigs:
             continue
-        for problem in check_why_row(acc, sigs[acc["account_id"]]):
+        for problem in check_why_row(acc, sigs[acc["account_id"]], refs[acc["account_id"]]):
             key = re.sub(r"['\"(\d].*", "", problem)[:60]
             kinds[key] += 1
             examples.setdefault(key, (acc["company_name"], problem))
@@ -333,20 +386,26 @@ def check_cut(account_rows, signal_rows, results, review_n=REVIEW_N):
     stage = {"cut_score": cut, "tie_size": len(tied), "tie_kept": len(kept), "tie_to_skip": len(tied) - len(kept), "kept_tied_ids": kept, "top_n_only": len(top_n)}
     differs = {k: (stage[k], mine[k]) for k in stage if stage[k] != mine[k]}
     weakest = max((rank_order(refs[a["account_id"]], sigs[a["account_id"]]) for a in top_n), default=None)
+    dropped_unflagged = [a for a in tied if a["band"] == "skip" and not sigs[a["account_id"]]["operator_name_shape"]]
+    kept_flagged = [a["company_name"] for a in tied if a["band"] == "review" and sigs[a["account_id"]]["operator_name_shape"]
+                    and any(d["urgency_score"] == a["urgency_score"] for d in dropped_unflagged)]  # a flagged account kept over an unflagged one with equal contact and urgency (D12.1)
     out_of_order = [a["company_name"] for a in live if a["band"] == "skip" and a["band_uncapped"] == "review" and weakest is not None
                     and rank_order(refs[a["account_id"]], sigs[a["account_id"]]) < weakest]
     expected_size = would + min(max(0, review_n - would), mine["top_n_only"] + mine["beyond_cut"])
-    ok = not differs and not out_of_order and review == expected_size
+    ok = not differs and not out_of_order and review == expected_size and not kept_flagged
     results.append((f"review cut (D11.2, N = {review_n}, floor {REVIEW_MIN}): band size, cut score, tie size, tied accounts kept and order of skip versus review equal my recomputation", ok,
                     f"review {review} (expected {expected_size}), would-be {would}, top-N only {len(top_n)}, cut score {cut}, tie {len(tied)}, kept {len(kept)}, to skip {len(tied) - len(kept)}; "
-                    f"differences from mine {differs or 'none'}; skip accounts ranked above the weakest review account {len(out_of_order)} {out_of_order[:3]}"))
+                    f"differences from mine {differs or 'none'}; skip accounts ranked above the weakest review account {len(out_of_order)} {out_of_order[:3]}; "
+                    f"flagged accounts kept at the cut over an unflagged one {len(kept_flagged)} {kept_flagged[:3]}"))
 
 
-def check_order(account_rows, results):
-    """Check the file is sorted by contact_score desc, urgency_score desc, host_count desc, account_id (D9.6 item 8)."""
-    keys = [(-a["contact_score"], -a["urgency_score"], -a["host_count"], a["account_id"]) for a in account_rows]
+def check_order(account_rows, signal_rows, results):
+    """Check the file is sorted by the D12.1 total order: contact_score desc, urgency_score desc, operator_name_shape asc, coalesce(kev_host_count, 0) desc, host_count desc, account_id asc."""
+    sigs = {s["company_id"]: s for s in signal_rows}
+    keys = [(-a["contact_score"], -a["urgency_score"], bool(sigs[a["account_id"]]["operator_name_shape"]), -(sigs[a["account_id"]]["kev_host_count"] or 0), -a["host_count"],
+             a["account_id"]) for a in account_rows if a["account_id"] in sigs]
     bad = [i for i in range(1, len(keys)) if keys[i - 1] > keys[i]]
-    results.append(("file order is contact_score desc, urgency_score desc, host_count desc, account_id asc (D9.6 item 8)", not bad,
+    results.append(("file order is contact_score desc, urgency_score desc, operator_name_shape asc (false first), coalesce(kev_host_count, 0) desc, host_count desc, account_id asc (D12.1)", not bad,
                     f"{len(bad)} adjacent pairs out of order; first at row {bad[0] if bad else 'none'}"))
 
 
@@ -388,8 +447,8 @@ def run_checks(accounts_path, signals_path, companies_path, review_n=REVIEW_N):
     check_ids_and_rows(account_rows, signal_rows, company_rows, results)
     check_recompute(account_rows, signal_rows, results, review_n)
     check_cut(account_rows, signal_rows, results, review_n)
-    flagged = check_why(account_rows, signal_rows, results)
-    check_order(account_rows, results)
+    flagged = check_why(account_rows, signal_rows, results, review_n)
+    check_order(account_rows, signal_rows, results)
     check_denylist(account_rows, results)
     check_stage_rules(account_rows, results)
     return results, flagged, account_rows, signal_rows
@@ -416,6 +475,8 @@ def recomputed_numbers(account_rows, signal_rows, review_n=REVIEW_N):
     skip_urgent = [cid for cid, r in mine.items() if r["band"] == "skip" and r["urgency_score"] > 0]
     below = [cid for cid in skip_urgent if mine[cid]["contact_score"] < REVIEW_MIN]
     beyond = [cid for cid in skip_urgent if mine[cid]["contact_score"] >= REVIEW_MIN]
+    signal_clause = [cid for cid in skip_urgent if any(n in SKIP_SIGNAL_NAMES for n in mine[cid]["top_signals"])]
+    d11_review, _d11_stats = review_selection(mine, sigs, review_n, order=rank_order_d11)
     non_ssh = lambda cid: bool(sigs[cid]["risky_non_ssh_exposed"])  # noqa: E731
     cvss7 = lambda cid: sigs[cid]["max_cvss"] is not None and sigs[cid]["max_cvss"] >= 7.0  # noqa: E731
     out = {"rows": len(mine), **{b: bands.get(b, 0) for b in BANDS}, "would_be_contacts": cut["would_be_contacts"], "cap_sets": dict(sets),
@@ -432,6 +493,21 @@ def recomputed_numbers(account_rows, signal_rows, review_n=REVIEW_N):
            "skip_beyond_cut_non_ssh": sum(1 for c in beyond if non_ssh(c)), "skip_beyond_cut_cvss7": sum(1 for c in beyond if cvss7(c)),
            "skip_beyond_cut_union": sum(1 for c in beyond if non_ssh(c) or cvss7(c)),
            "longest_why_words": max((len(words(a["why"])) for a in account_rows if a["why"]), default=0),
+           "longest_why_words_recount": max((expected_words(r["top_signals"] or [], sigs[cid], r, r["band"]) for cid, r in mine.items()), default=0),
+           "longest_skip_why_words": max((len(words(a["why"])) for a in account_rows if a["band"] == "skip" and a["why"]), default=0),
+           "skip_signal_clause": len(signal_clause), "skip_signal_clause_kev": sum(1 for c in signal_clause if "kev_exposed" in mine[c]["top_signals"]),
+           "skip_signal_clause_cvss": sum(1 for c in signal_clause if "max_cvss_band" in mine[c]["top_signals"]),
+           "skip_signal_clause_at_or_above_floor": sum(1 for c in signal_clause if mine[c]["contact_score"] >= REVIEW_MIN),
+           "skip_signal_clause_below_floor": sum(1 for c in signal_clause if mine[c]["contact_score"] < REVIEW_MIN), "skip_plain_clause": len(skip_urgent) - len(signal_clause),
+           "skip_signal_clause_in_file": sum(1 for a in account_rows if a["band"] == "skip" and a["why"].endswith(SKIP_CLAUSE_SIGNAL)),
+           "skip_plain_clause_in_file": sum(1 for a in account_rows if a["band"] == "skip" and a["why"].endswith(SKIP_CLAUSE)),
+           "exposure_phrase_accounts": sum(1 for r in mine.values() if "exposed_and_outdated" in (r["top_signals"] or [])),
+           "exposure_phrase_accounts_in_file": sum(1 for a in account_rows if "software that is end-of-life or whose version matches a CVSS 7+ vulnerability" in a["why"]),
+           "exposure_old_phrase_in_file": sum(1 for a in account_rows if "on outdated software" in a["why"]),
+           "exposure_top_two_before_fallback": sum(1 for r in mine.values() if "exposed_and_outdated" in (r["top_before_fallback"] or [])),
+           "fallback_accounts": sum(1 for r in mine.values() if r["fallback"]), "fallback_dropped_exposure": sum(1 for r in mine.values() if r["fallback"] and "exposed_and_outdated" in r["top_before_fallback"][1:]),
+           "kept_tied_flagged": sum(1 for c in cut["kept_ids"] if sigs[c]["operator_name_shape"]),
+           "review_operator_shaped_d11": sum(1 for cid in d11_review if sigs[cid]["operator_name_shape"]),
            "union_fit_lost": sum(1 for cid in mine if mine[cid]["fit_score"] < old[cid]["fit_score"]),
            "union_contact_changed": sum(1 for cid in mine if mine[cid]["contact_score"] != old[cid]["contact_score"]),
            "quantiles": {name: {q: quantile([r[name] for r in mine.values()], q / 100) for q in (5, 25, 50, 75, 90, 95, 99)} for name in ("fit_score", "urgency_score", "contact_score")},
@@ -446,6 +522,21 @@ def author_table(mine):
     lines = ["| quantity | author | mine | match |", "|---|---|---|---|"]
     lines += [f"| {k} | {a} | {m} | {'yes' if a == m else 'NO'} |" for k, a, m in rows]
     return lines
+
+
+def movement(account_rows, signal_rows, review_n=REVIEW_N):
+    """Return what D12.1 moved: the names kept at the cut, the names that left review against the D11 order, and the top-25 order difference against the D11 order."""
+    sigs = {s["company_id"]: s for s in signal_rows}
+    refs, stats = reference_all(signal_rows, review_n)
+    d11_review, _ = review_selection(refs, sigs, review_n, order=rank_order_d11)
+    now = {cid for cid, r in refs.items() if r["band"] == "review"}
+    live = [cid for cid, r in refs.items() if r["band_uncapped"] != "exclude"]
+    top_new = sorted(live, key=lambda c: rank_order(refs[c], sigs[c]))[:25]
+    top_old = sorted(live, key=lambda c: rank_order_d11(refs[c], sigs[c]))[:25]
+    name = lambda c: sigs[c]["company_name"]  # noqa: E731
+    return {"kept": [name(c) for c in stats["kept_ids"]], "left_review": sorted(name(c) for c in d11_review - now), "entered_review": sorted(name(c) for c in now - d11_review),
+            "top25_same_set": set(top_new) == set(top_old), "top25_position_changes": sum(1 for a, b in zip(top_new, top_old) if a != b),
+            "top25_new": [name(c) for c in top_new], "top25_old": [name(c) for c in top_old]}
 
 
 def render(results):
@@ -474,6 +565,12 @@ def main():
         if key not in ("cap_sets", "quantiles"):
             print(f"- {key}: {value}")
     print(f"- cap sets: {mine['cap_sets']}")
+    move = movement(account_rows, signal_rows, args.review_n)
+    print("\n## What D12.1 moved (my recomputation against the D11 order)\n")
+    print(f"- kept at the cut ({len(move['kept'])}): {move['kept']}; author's: {list(AUTHOR_KEPT)}; equal: {sorted(move['kept']) == sorted(AUTHOR_KEPT)}")
+    print(f"- left review ({len(move['left_review'])}): {move['left_review']}; author's: {sorted(AUTHOR_LEFT)}; equal: {all(n.startswith(a) for n, a in zip(move['left_review'], sorted(AUTHOR_LEFT)))} (equal after the author's trimmed legal suffixes)")
+    print(f"- entered review ({len(move['entered_review'])}): {move['entered_review']}")
+    print(f"- top 25 by the total order: same set as under the D11 order {move['top25_same_set']}; positions that differ {move['top25_position_changes']}")
     for name, qs in mine["quantiles"].items():
         print(f"- {name} quantiles (linear): {', '.join(f'p{q} {v:.2f}' for q, v in qs.items())}")
     print(f"\n## Alarm or reassurance words in why (report only, {len(flagged)} hits)\n")

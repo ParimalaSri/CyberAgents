@@ -14,11 +14,13 @@
 # block of check_accounts_extra.py in the same PR as section 3.4 of ARCHITECTURE.md; a contract changes only with a reason. On the FULL run N is
 # derived from the prod ceiling and is not scaled from the sample (D9.8, D11.2). The checks that never change with calibration: 0 <= contact_score
 # <= urgency_score, the score ranges, the band set, the cap logic, the exclude rule (D9.3, decided), the why rules.
+# D12 (2026-10-11): the rank order, the skip clause and the exposure phrase changed; the scores did not (bands 0 / 200 / 5,589 / 1 on the sample).
 # D11 BAND MODEL: band_uncapped is threshold-based (contact from X, review from Y, else skip). band is the stored band after the caps and the
 # D11.2 top-N rule: every would-be contact is held in review (cap), plus the best remaining non-excluded accounts by the total order
-# (contact_score, urgency_score, host_count descending, then account_id) until the band holds REVIEW_N rows, with the floor contact_score >= Y;
+# (D12.1 order: contact_score desc, urgency_score desc, operator_name_shape asc with false first, coalesce(kev_host_count, 0) desc, host_count desc, account_id asc) until the band holds REVIEW_N rows, with the floor contact_score >= Y;
 # everything else non-excluded is skip. So band_uncapped = review with band = skip is legitimate (beyond the cut), cap_reasons exist only for
-# would-be contacts, and a skip why ends "Below the review cut-off." (D11.3).
+# would-be contacts, and a skip why with urgency above 0 ends "Below the review cut-off." (D11.3) or, when the kept top_signals name kev_exposed or
+# max_cvss_band, "Ranked below this run's review list; a rank, not a judgement of risk." (D12.2). The exposure phrase is the D12.3 string (docs/ISSUES.md DQ-017 to DQ-019).
 # STAGE-4 RULE, relaxed at M3: decision and prompt_version are all null and final_band = band, and no account is in `contact` while
 # decision is null (D10). llm/adjudicate.py may set decision, prompt_version and final_band = decision for band = review rows only; the
 # M3 PR must replace the checks marked "M2 only" by D9.9 rule 6 (decision null unless band = review; prompt_version null exactly when
@@ -130,10 +132,11 @@ checks:
     sql: "SELECT count(*) FROM t WHERE band_uncapped = 'contact' AND band <> 'review'"
   - name: cap_reasons is null exactly when band_uncapped is not contact (a skip account may have band_uncapped review; only would-be contacts are capped; D11)
     sql: "SELECT count(*) FROM t WHERE (cap_reasons IS NULL) IS DISTINCT FROM (band_uncapped <> 'contact')"
-  - name: PROVISIONAL N = 200, Y = 20, review is every would-be contact plus the non-excluded accounts with contact_score >= Y ranked by (contact_score, urgency_score, host_count desc, account_id) at rank N or better; excluded accounts take no slot (D11.2, recomputed in SQL)
+  - name: PROVISIONAL N = 200, Y = 20, review is every would-be contact plus the non-excluded accounts with contact_score >= Y ranked by the D12.1 order (contact_score desc, urgency_score desc, operator_name_shape asc, coalesce(kev_host_count, 0) desc, host_count desc, account_id asc) at rank N or better; excluded accounts take no slot (D11.2, recomputed in SQL)
     sql: >-
-      WITH p AS (SELECT 200 AS n), r AS (SELECT band, band_uncapped, contact_score, row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC,
-      host_count DESC, account_id ASC) AS rn FROM t WHERE band_uncapped <> 'exclude')
+      WITH p AS (SELECT 200 AS n), r AS (SELECT t.band, t.band_uncapped, t.contact_score, row_number() OVER (ORDER BY t.contact_score DESC, t.urgency_score DESC,
+      coalesce(s.operator_name_shape, false) ASC, coalesce(s.kev_host_count, 0) DESC, t.host_count DESC, t.account_id ASC) AS rn
+      FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id WHERE t.band_uncapped <> 'exclude')
       SELECT count(*) FROM r WHERE (band = 'review') IS DISTINCT FROM (band_uncapped = 'contact' OR (contact_score >= 20 AND rn <= (SELECT n FROM p)))
   - name: PROVISIONAL N = 200, Y = 20, the review band holds N rows (or every would-be contact when they exceed N, or every account with contact_score >= Y when fewer exist) (D11.2)
     sql: >-
@@ -141,8 +144,9 @@ checks:
       SELECT abs((SELECT count(*) FROM t WHERE band = 'review') - ((SELECT c FROM w) + least(greatest((SELECT n FROM p) - (SELECT c FROM w), 0), (SELECT c FROM e))))
   - name: PROVISIONAL Y = 20, N = 200, skip implies contact_score below Y or a rank beyond the cut (the weakest review account outranks every skip account with contact_score >= Y; D11.2)
     sql: >-
-      WITH p AS (SELECT 200 AS n), r AS (SELECT band, band_uncapped, contact_score, row_number() OVER (ORDER BY contact_score DESC, urgency_score DESC,
-      host_count DESC, account_id ASC) AS rn FROM t WHERE band_uncapped <> 'exclude')
+      WITH p AS (SELECT 200 AS n), r AS (SELECT t.band, t.band_uncapped, t.contact_score, row_number() OVER (ORDER BY t.contact_score DESC, t.urgency_score DESC,
+      coalesce(s.operator_name_shape, false) ASC, coalesce(s.kev_host_count, 0) DESC, t.host_count DESC, t.account_id ASC) AS rn
+      FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id WHERE t.band_uncapped <> 'exclude')
       SELECT count(*) FROM r WHERE band = 'skip' AND contact_score >= 20 AND rn <= (SELECT n FROM p)
   - name: no account is in band contact while decision is null (D10; only adjudication may clear a would-be contact)
     sql: "SELECT count(*) FROM t WHERE band = 'contact' AND decision IS NULL"
@@ -194,16 +198,25 @@ checks:
     sql: >-
       SELECT count(*) FROM t WHERE (band_uncapped = 'contact') IS DISTINCT FROM
       ends_with(why, 'Not yet checked that this is an end-user organisation, not a network operator.')
-  - name: why of every skip account with urgency above 0 ends with the D11.3 clause "Below the review cut-off.", and no other account carries it
+  - name: why of every skip account whose top_signals name kev_exposed or max_cvss_band ends with the D12.2 clause "Ranked below this run's review list; a rank, not a judgement of risk.", and no other account carries it
     sql: >-
-      SELECT count(*) FROM t WHERE (band = 'skip' AND urgency_score > 0) IS DISTINCT FROM ends_with(why, 'Below the review cut-off.')
+      SELECT count(*) FROM t WHERE (band = 'skip' AND (coalesce(list_contains(string_split(top_signals, ','), 'kev_exposed'), false)
+      OR coalesce(list_contains(string_split(top_signals, ','), 'max_cvss_band'), false))) IS DISTINCT FROM ends_with(why, 'Ranked below this run''s review list; a rank, not a judgement of risk.')
+  - name: why of every other skip account with urgency above 0 ends with the D11.3 clause "Below the review cut-off.", and no other account carries it (D12.2)
+    sql: >-
+      SELECT count(*) FROM t WHERE (band = 'skip' AND urgency_score > 0 AND NOT coalesce(list_contains(string_split(top_signals, ','), 'kev_exposed'), false)
+      AND NOT coalesce(list_contains(string_split(top_signals, ','), 'max_cvss_band'), false)) IS DISTINCT FROM ends_with(why, 'Below the review cut-off.')
+  - name: the two skip clauses never appear together and never inside a non-skip why (a skip why carries at most one of them)
+    sql: >-
+      SELECT count(*) FROM t WHERE (contains(why, 'Below the review cut-off.') AND contains(why, 'Ranked below this run''s review list'))
+      OR (band <> 'skip' AND (contains(why, 'Below the review cut-off.') OR contains(why, 'Ranked below this run''s review list')))
   - name: why of every review row whose name has the operator shape (signals operator_shape_t1 or operator_shape_t2) contains "Name looks like a network operator.", and no other row does (D9.6 item 7, D11.3)
     sql: >-
       SELECT count(*) FROM t JOIN read_parquet('data/gold/signals.parquet') s ON s.company_id = t.account_id
       WHERE (t.band = 'review' AND (s.operator_shape_t1 OR s.operator_shape_t2)) IS DISTINCT FROM contains(t.why, 'Name looks like a network operator.')
-  - name: why never uses the pre-D11 wording or a forbidden phrase (Exposure is limited, with a vulnerability on the CISA, worst vulnerability scores, located in, based in, is vulnerable, known-exploited host, has been exploited)
+  - name: why never uses the pre-D11 wording or a forbidden phrase (Exposure is limited, with a vulnerability on the CISA, worst vulnerability scores, located in, based in, is vulnerable, known-exploited host, has been exploited, on outdated software)
     sql: >-
-      SELECT count(*) FROM t WHERE regexp_matches(lower(why), 'exposure is limited|with a vulnerability on the cisa|worst vulnerability scores|located in|based in|is vulnerable|known-exploited host|has been exploited')
+      SELECT count(*) FROM t WHERE regexp_matches(lower(why), 'exposure is limited|with a vulnerability on the cisa|worst vulnerability scores|located in|based in|is vulnerable|known-exploited host|has been exploited|on outdated software')
   - name: the KEV phrase "N host(s) running software whose version matches the CISA known-exploited list" is in why exactly when top_signals names kev_exposed (D11.3, RAW-006)
     sql: >-
       SELECT count(*) FROM t WHERE coalesce(list_contains(string_split(top_signals, ','), 'kev_exposed'), false)
@@ -212,6 +225,10 @@ checks:
     sql: >-
       SELECT count(*) FROM t WHERE coalesce(list_contains(string_split(top_signals, ','), 'max_cvss_band'), false)
       IS DISTINCT FROM regexp_matches(why, '[Ww]orst version-matched vulnerability scores CVSS [0-9]+(\.[0-9]+)?')
+  - name: the exposure phrase "an exposed admin or database service (<ports>) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability" is in why exactly when top_signals names exposed_and_outdated (D12.3)
+    sql: >-
+      SELECT count(*) FROM t WHERE coalesce(list_contains(string_split(top_signals, ','), 'exposed_and_outdated'), false)
+      IS DISTINCT FROM regexp_matches(why, '[Aa]n exposed admin or database service \([^)]*\) on software that is end-of-life or whose version matches a CVSS 7\+ vulnerability')
   - name: why of an excluded account is the honeypot text, and no other account carries it
     sql: "SELECT count(*) FROM t WHERE (band = 'exclude') IS DISTINCT FROM starts_with(why, 'Mostly honeypot or attacker-infrastructure hosts (')"
   # ---- top_signals (D9.6 item 7: names exist and are true in signals) -------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Tests for check_accounts_extra.py and context/contracts/accounts.yml (D11): hand-computed unit cases, a clean synthetic layer, injected-fault mutations including the top-N cut."""
+"""Tests for check_accounts_extra.py and context/contracts/accounts.yml (D11, D12): hand-computed unit cases, a clean synthetic layer, injected-fault mutations including the top-N cut, the D12.1 tie order, the D12.2 skip clause, the D12.3 phrase and the 40-word fallback."""
 import hashlib
 import sys
 import tempfile
@@ -20,6 +20,10 @@ CLAUSE = extra.CLAUSE
 KEV_PHRASE = "running software whose version matches the CISA known-exploited list"  # D11.3
 OLD_KEV = "with a vulnerability on the CISA known-exploited list"  # pre-D11 wording
 SKIP = extra.SKIP_CLAUSE
+SKIP_SIG = extra.SKIP_CLAUSE_SIGNAL
+SKIP_SIG_Q = SKIP_SIG.replace("'", "''")  # the clause quoted for a SQL string literal
+EXPOSED = "an exposed admin or database service ({ports}) on software that is end-of-life or whose version matches a CVSS 7+ vulnerability"  # D12.3
+OLD_EXPOSED = "an exposed admin or database service ({ports}) on outdated software"  # pre-D12 phrase
 OPC = extra.OPERATOR_CLAUSE
 TEST_N = 8  # review band size of the synthetic layer; the contract text is rewritten from 200 to this value (see run_contract)
 SIGNAL_TYPES = (
@@ -37,6 +41,11 @@ ACCOUNT_TYPES = (("account_id", "VARCHAR"), ("company_name", "VARCHAR"), ("count
                  ("prompt_version", "VARCHAR"), ("final_band", "VARCHAR"))
 
 
+def upper_first(text):
+    """Return a text with only its first letter upper-cased (str.capitalize would lower-case CVSS)."""
+    return text[0].upper() + text[1:]
+
+
 def sig(name, country="DE", conf="high", hosts=3, ips=3, kev=0, cvss=None, cert=0, eol=0, legacy=0, ports=(), eo=False, sens=False, t1=False, t2=False,
         noise=0, share=0.0, blind=False):
     """Build one synthetic signals row dict from the few knobs a case needs; every derived flag follows the D9.4 definitions."""
@@ -52,68 +61,70 @@ def sig(name, country="DE", conf="high", hosts=3, ips=3, kev=0, cvss=None, cert=
             "risky_ports": list(ports), "exposed_and_outdated": eo}
 
 
-# (signals row, expected fit, urgency, contact, top_signals, band_uncapped, cap_reasons, band, why); every expected value is computed by hand from D9.7, D10 and D11
-# (territory 0 points, footprint 15 per band, operator penalty 30, contact = round half up of urgency * (0.5 + 0.5 * fit / 100)).
-# band "AUTO": Beta Singleton and Mu Single Honey tie on every sort key except account_id; with TEST_N = 8 the lower account_id takes the last review slot (D11.2).
-# Order of the non-excluded accounts: Omicron 83, Acme 51, Delta 45, Pi Wireless 40 (the four would-be contacts), Kappa 37, Gamma Research 35, Rackhost 25 (5 hosts),
-# then Beta and Mu at 25 (1 host), Iota 24, Theta 16, then scores of 3 or less. Cut: score 25, tie of 3, 2 kept, 1 to skip; Iota (24) is beyond the cut, Theta (16) below the floor.
+# (signals row, expected fit, urgency, contact, top_signals, band_uncapped, cap_reasons, band, why); every expected value is computed by hand from D9.7, D10, D11 and D12
+# (territory 0 points, footprint 15 per band, operator penalty 30, contact = round half up of urgency * (0.5 + 0.5 * fit / 100); a skip why ends with the D12.2 clause
+# for kept KEV or CVSS signals and "Below the review cut-off." otherwise; two signals that pass 40 words keep only the first).
+# Order of the non-excluded accounts: Omicron 83, Acme 51, Delta 45, Pi Wireless 40 (the four would-be contacts), Kappa 37, Gamma Research 35, then the tie at 25:
+# Tau Duo (unflagged, 2 KEV hosts), Upsilon Duo (unflagged, 1 KEV host, 4 hosts), Phi Duo (unflagged, 1 KEV host, 3 hosts), Beta and Mu (unflagged, 1 host, 1 KEV host)
+# and Rackhost (operator-flagged, 5 hosts), then Iota 24, Theta 16, then scores of 3 or less. With TEST_N = 8 two tie slots remain: D12.1 keeps Tau (kev_host_count 2) and
+# Upsilon (more hosts than Phi); the D11 order would keep Rackhost (5 hosts) and Upsilon; flagged first would keep Rackhost and Tau; ignoring kev_host_count would keep Upsilon and Phi.
+# Cut: score 25, tie of 6, 2 kept, 4 to skip; Iota (24) is beyond the cut, Theta (16) below the floor.
 CASES = [
     (sig("Acme Retail", "US", hosts=24, ips=24, kev=2, cvss=9.8, ports=(22,), eol=1, cert=1), 45, 70, 51, "kev_exposed,footprint_band", "contact", "operator_unverified", "review",
      f"2 hosts {KEV_PHRASE}; 24 IPs in the footprint. {CLAUSE}"),
-    (sig("Beta Singleton", "US", hosts=1, ips=1, kev=1), 0, 50, 25, "kev_exposed", "review", None, "AUTO", f"1 host {KEV_PHRASE}."),
+    (sig("Beta Singleton", "US", hosts=1, ips=1, kev=1), 0, 50, 25, "kev_exposed", "review", None, "skip", f"1 host {KEV_PHRASE}. {SKIP_SIG}"),
     (sig("Gamma Cdn", "FR", conf="low", hosts=2, ips=2, cert=2, blind=True), 15, 5, 3, "footprint_band,cert_expired_or_soon", "skip", None, "skip",
      f"2 IPs in the footprint; 2 hosts with expired or soon-expiring certificates. {SKIP}"),
-    (sig("Rackhost Zrt", "US", hosts=5, ips=5, kev=1, t2=True), 0, 50, 25, "kev_exposed,footprint_band", "review", None, "review",
-     f"1 host {KEV_PHRASE}; 5 IPs in the footprint. {OPC}"),
+    (sig("Rackhost Zrt", "US", hosts=5, ips=5, kev=1, t2=True), 0, 50, 25, "kev_exposed,footprint_band", "review", None, "skip",
+     f"1 host {KEV_PHRASE}; 5 IPs in the footprint. {SKIP_SIG}"),
     (sig("Gamma Research", "US", hosts=30, ips=30, kev=3, cvss=9.8, eol=1, t1=True), 15, 60, 35, "kev_exposed,footprint_band", "review", None, "review",
      f"3 hosts {KEV_PHRASE}; 30 IPs in the footprint. {OPC}"),
-    (sig("Delta Stores", "US", conf="low", hosts=1, ips=1, kev=1, cvss=9.9, ports=(3389,), eol=1, eo=True), 0, 90, 45, "kev_exposed,exposed_and_outdated", "contact",
-     "low_confidence,operator_unverified,singleton", "review",
-     f"1 host {KEV_PHRASE}; an exposed admin or database service (RDP 3389) on outdated software. Only one host seen. {CLAUSE}"),
+    (sig("Delta Stores", "US", conf="low", hosts=1, ips=1, kev=1, cvss=9.9, ports=(3389,), eol=1, eo=True), 0, 90, 45, "kev_exposed", "contact",
+     "low_confidence,operator_unverified,singleton", "review", f"1 host {KEV_PHRASE}. Only one host seen. {CLAUSE}"),  # two signals would be 49 words: the fallback keeps one
     (sig("Epsilon Quiet", "DE", hosts=3, ips=3), 15, 0, 0, None, "skip", None, "skip", "No exposure signal found in the scan (3 hosts seen)."),
     (sig("Zeta Honey", "US", hosts=2, ips=2, kev=1, noise=3, share=0.6), 15, 50, 29, None, "exclude", None, "exclude", "Mostly honeypot or attacker-infrastructure hosts (3 of 5)."),
     (sig("Eta Shell", None, hosts=1, ips=1, ports=(22,)), 0, 5, 3, "risky_service_exposed", "skip", None, "skip", f"SSH (port 22) open to the internet. {SKIP}"),
     (sig("Theta Systems", "US", hosts=8, ips=8, ports=(22, 3306), legacy=1, cert=1), 30, 25, 16, "footprint_band,risky_non_ssh_exposed", "skip", None, "skip",
-     f"8 IPs in the footprint; remote-admin or database services exposed (SSH 22, MySQL 3306). {SKIP}"),
+     f"8 IPs in the footprint; remote-admin or database services exposed (MySQL 3306). {SKIP}"),
     (sig("Iota Works", "DE", hosts=4, ips=4, cvss=7.5, sens=True, eol=2), 35, 35, 24, "max_cvss_band,sensitive_stack", "review", None, "skip",
-     f"Worst version-matched vulnerability scores CVSS 7.5; database, medical or IoT systems in the stack. {SKIP}"),
+     f"Worst version-matched vulnerability scores CVSS 7.5; database, medical or IoT systems in the stack. {SKIP_SIG}"),
     (sig("Kappa Bank", "US", hosts=2, ips=2, cvss=7.2, ports=(22, 3389), eol=1, eo=True), 15, 65, 37, "exposed_and_outdated,max_cvss_band", "review", None, "review",
-     "An exposed admin or database service (SSH 22, RDP 3389) on outdated software; worst version-matched vulnerability scores CVSS 7.2."),
+     upper_first(EXPOSED.format(ports="SSH 22, RDP 3389")) + "; worst version-matched vulnerability scores CVSS 7.2."),
     (sig("Lambda Legacy", "DE", hosts=3, ips=1, legacy=2), 0, 5, 3, "legacy_tls", "skip", None, "skip", f"2 hosts still offering old TLS versions. {SKIP}"),
-    (sig("Mu Single Honey", "US", hosts=1, ips=1, kev=1, noise=1, share=0.5), 0, 50, 25, "kev_exposed", "review", None, "AUTO", f"1 host {KEV_PHRASE}."),
+    (sig("Mu Single Honey", "US", hosts=1, ips=1, kev=1, noise=1, share=0.5), 0, 50, 25, "kev_exposed", "review", None, "skip", f"1 host {KEV_PHRASE}. {SKIP_SIG}"),
     (sig("Nu Cable", "US", hosts=1, ips=1, t1=True), 0, 0, 0, None, "skip", None, "skip", "No exposure signal found in the scan (1 host seen)."),
     (sig("Xi Mobile", "DE", hosts=1, ips=1, t1=True), 0, 0, 0, None, "skip", None, "skip", "No exposure signal found in the scan (1 host seen)."),
     (sig("Omicron Works", "US", hosts=40, ips=40, kev=1, cvss=9.9, ports=(3389,), eol=1, cert=1, legacy=1, eo=True, sens=True), 65, 100, 83, "kev_exposed,footprint_band",
      "contact", "operator_unverified", "review", f"1 host {KEV_PHRASE}; 40 IPs in the footprint. {CLAUSE}"),
     (sig("Pi Wireless", "DE", hosts=24, ips=24, kev=1, eol=1, cert=1, legacy=1, t1=True), 15, 70, 40, "kev_exposed,footprint_band", "contact", "operator_name_shape,operator_unverified",
      "review", f"1 host {KEV_PHRASE}; 24 IPs in the footprint. {OPC} {CLAUSE}"),
+    (sig("Tau Duo", "DE", hosts=2, ips=1, kev=2), 0, 50, 25, "kev_exposed", "review", None, "review", f"2 hosts {KEV_PHRASE}."),
+    (sig("Upsilon Duo", "DE", hosts=4, ips=1, kev=1), 0, 50, 25, "kev_exposed", "review", None, "review", f"1 host {KEV_PHRASE}."),
+    (sig("Phi Duo", "DE", hosts=3, ips=1, kev=1), 0, 50, 25, "kev_exposed", "review", None, "skip", f"1 host {KEV_PHRASE}. {SKIP_SIG}"),
 ]
-TIE_NAMES = ("Beta Singleton", "Mu Single Honey")
-TIE_WINNER = min(TIE_NAMES, key=lambda n: hashlib.sha256(n.encode()).hexdigest()[:16])  # the lower account_id takes the last review slot
-TIE_LOSER = next(n for n in TIE_NAMES if n != TIE_WINNER)
+TIE_KEPT = ("Tau Duo", "Upsilon Duo")
 
 
-def account_rows():
-    """Return the expected accounts rows in the D9.6 item 8 sort order, as tuples in ACCOUNT_TYPES order; the AUTO tie accounts are resolved by account_id."""
-    rows = []
+def account_rows(d11_order=False):
+    """Return the expected accounts rows in the D12.1 sort order (or the D11 order when asked, for the order mutation), as tuples in ACCOUNT_TYPES order."""
+    rows, flag, kev = [], {}, {}
     for s, fit, urgency, contact, top, uncapped, caps, band, why in CASES:
-        name = s["company_name"]
-        if band == "AUTO":
-            band = "review" if name == TIE_WINNER else "skip"
-            why = why if band == "review" else f"{why} {SKIP}"
-        rows.append((s["company_id"], name, s["country_code"], s["host_count"], s["identity_source"], s["identity_confidence"], fit, urgency, contact, top,
+        rows.append((s["company_id"], s["company_name"], s["country_code"], s["host_count"], s["identity_source"], s["identity_confidence"], fit, urgency, contact, top,
                      uncapped, caps, band, why, None, None, band))
-    return sorted(rows, key=lambda r: (-r[8], -r[7], -r[3], r[0]))
+        flag[s["company_id"]], kev[s["company_id"]] = bool(s["operator_name_shape"]), -(s["kev_host_count"] or 0)
+    if d11_order:
+        return sorted(rows, key=lambda r: (-r[8], -r[7], -r[3], r[0]))
+    return sorted(rows, key=lambda r: (-r[8], -r[7], flag[r[0]], kev[r[0]], -r[3], r[0]))
 
 
-def build_layers(directory, mutation_sql=(), reverse=False):
+def build_layers(directory, mutation_sql=(), reverse=False, d11_order=False):
     """Write synthetic signals, companies and accounts parquet files (accounts and signals with optional mutations) into a directory; return the three paths."""
     con = duckdb.connect()
     con.execute("CREATE TABLE s (" + ", ".join(f"{n} {t}" for n, t in SIGNAL_TYPES) + ")")
     con.executemany(f"INSERT INTO s VALUES ({', '.join('?' for _ in SIGNAL_TYPES)})", [tuple(c[0][n] for n, _ in SIGNAL_TYPES) for c in CASES])
     con.execute("CREATE TABLE c AS SELECT company_id FROM s")
     con.execute("CREATE TABLE a (" + ", ".join(f"{n} {t}" for n, t in ACCOUNT_TYPES) + ")")
-    rows = account_rows()
+    rows = account_rows(d11_order)
     con.executemany(f"INSERT INTO a VALUES ({', '.join('?' for _ in ACCOUNT_TYPES)})", rows[::-1] if reverse else rows)
     for statement in mutation_sql:
         con.execute(statement)
@@ -157,7 +168,8 @@ def to_band(name, band):
     return q(name, f"band = '{band}', final_band = '{band}'")
 
 
-KAPPA_HEAD = "An exposed admin or database service (SSH 22, RDP 3389) on outdated software"
+KAPPA_HEAD = upper_first(EXPOSED.format(ports="SSH 22, RDP 3389"))
+OLD_KAPPA_HEAD = upper_first(OLD_EXPOSED.format(ports="SSH 22, RDP 3389"))
 LONG_WHY = f"1 host {KEV_PHRASE}; " + " ".join(["Extra words"] * 20)
 # (name, SQL statements, detectors that must fail, reverse order, needle). Detector "contract" is accounts.yml, "extra" is check_accounts_extra.
 # needle: a substring that must appear in a failed contract check name (pins the mutation to the intended rule); "" = any check.
@@ -183,19 +195,24 @@ MUTATIONS = [
     ("non-excluded account excluded (one honeypot row on a singleton)", [q("Mu Single Honey", "band = 'exclude', band_uncapped = 'exclude', final_band = 'exclude'")],
      ("contract", "extra"), False, ""),
     ("exclude boundary: two noise hosts at share 0.5 not excluded", ["UPDATE s SET noise_host_count = 2 WHERE company_name = 'Mu Single Honey'"], ("contract", "extra"), False, ""),
-    # ---- the D11.2 cut ----
-    ("wrong N: the review band holds one account too many (the tie loser promoted)", [to_band(TIE_LOSER, "review")], ("contract", "extra"), False, "N = 200"),
-    ("wrong N: the review band is one account short (the tie winner dropped, as if an excluded account took the slot)", [to_band(TIE_WINNER, "skip")], ("contract", "extra"), False,
+    # ---- the D11.2 cut and the D12.1 order ----
+    ("wrong N: the review band holds one account too many (the third unflagged tie account promoted)", [to_band("Phi Duo", "review")], ("contract", "extra"), False, "N = 200"),
+    ("wrong N: the review band is one account short (a tie winner dropped, as if an excluded account took the slot)", [to_band("Upsilon Duo", "skip")], ("contract", "extra"), False,
      "N = 200"),
     ("a would-be contact dropped from review (moved to skip)", [to_band("Pi Wireless", "skip")], ("contract", "extra"), False, "would-be contact is in band review"),
     ("order violation: a skip account scores higher than the weakest review account (Kappa 37 out, Iota 24 in)", [to_band("Kappa Bank", "skip"), to_band("Iota Works", "review")],
      ("contract", "extra"), False, "N = 200"),
-    ("tie broken wrongly: the higher account_id takes the last slot", [to_band(TIE_WINNER, "skip"), to_band(TIE_LOSER, "review")], ("contract", "extra"), False, "N = 200"),
-    ("tie broken by host_count wrongly: the 5-host account out, both 1-host accounts in", [to_band("Rackhost Zrt", "skip"), to_band(TIE_LOSER, "review")],
+    ("old tie order (host_count before the operator flag): the 5-host flagged account and the 4-host account kept, Tau out", [to_band("Rackhost Zrt", "review"), to_band("Tau Duo", "skip")],
+     ("contract", "extra"), False, "N = 200"),
+    ("flagged first (operator flag descending): the flagged account and Tau kept, Upsilon out", [to_band("Rackhost Zrt", "review"), to_band("Upsilon Duo", "skip")],
+     ("contract", "extra"), False, "N = 200"),
+    ("kev_host_count ignored: the 4-host and 3-host accounts kept, Tau (2 KEV hosts) out", [to_band("Phi Duo", "review"), to_band("Tau Duo", "skip")], ("contract", "extra"), False, "N = 200"),
+    ("a flagged account kept at the cut over an unflagged one with the same scores (Rackhost in, Upsilon out)", [to_band("Rackhost Zrt", "review"), to_band("Upsilon Duo", "skip")],
      ("contract", "extra"), False, "N = 200"),
     ("the floor ignored: a below-floor account (Theta, 16) promoted into review", [to_band("Theta Systems", "review")], ("contract", "extra"), False, "bands move only"),
     ("a skip account moved up from band_uncapped skip to review", [to_band("Lambda Legacy", "review")], ("contract", "extra"), False, "bands move only"),
     ("band_uncapped of a beyond-the-cut account no longer follows contact_score", [q("Iota Works", "band_uncapped = 'skip'")], ("contract", "extra"), False, "band_uncapped follows"),
+    ("file sorted in the D11 order (host_count before the operator flag and kev_host_count)", [], ("extra",), False, "", True),
     # ---- why ----
     ("empty why", [q("Kappa Bank", "why = ''")], ("contract", "extra"), False, ""),
     ("null why", [q("Kappa Bank", "why = NULL")], ("contract", "extra"), False, ""),
@@ -210,6 +227,24 @@ MUTATIONS = [
     ("old skip wording 'Exposure is limited.'", [q("Eta Shell", "why = 'SSH (port 22) open to the internet. Exposure is limited.'")], ("contract", "extra"), False, ""),
     ("skip clause dropped from a skip account with urgency", [q("Eta Shell", "why = 'SSH (port 22) open to the internet.'")], ("contract", "extra"), False, "Below the review cut-off"),
     ("skip clause on a review account", [q("Kappa Bank", f"why = why || ' {SKIP}'")], ("contract", "extra"), False, "Below the review cut-off"),
+    ("wrong skip clause on a KEV skip row (the plain clause after a KEV sentence, D12.2)", [q("Beta Singleton", f"why = '1 host {KEV_PHRASE}. {SKIP}'")], ("contract", "extra"), False,
+     "Ranked below this run"),
+    ("wrong skip clause on a CVSS skip row (the plain clause after a CVSS sentence)",
+     [q("Iota Works", f"why = 'Worst version-matched vulnerability scores CVSS 7.5; database, medical or IoT systems in the stack. {SKIP}'")], ("contract", "extra"), False,
+     "Ranked below this run"),
+    ("the D12.2 clause on a skip row without KEV or CVSS (Eta Shell)", [q("Eta Shell", f"why = 'SSH (port 22) open to the internet. {SKIP_SIG_Q}'")], ("contract", "extra"), False,
+     "Below the review cut-off"),
+    ("both skip clauses on one why", [q("Beta Singleton", f"why = why || ' {SKIP}'")], ("contract", "extra"), False, "never appear together"),
+    ("the D12.2 clause on a review row", [q("Kappa Bank", f"why = why || ' {SKIP_SIG_Q}'")], ("contract", "extra"), False, "never appear together"),
+    ("the old exposure phrase 'on outdated software' (D12.3)", [q("Kappa Bank", f"why = '{OLD_KAPPA_HEAD}; worst version-matched vulnerability scores CVSS 7.2.'")],
+     ("contract", "extra"), False, "exposure phrase"),
+    ("the exposure phrase cut short (no CVSS 7+ clause)", [q("Kappa Bank", f"why = 'An exposed admin or database service (SSH 22, RDP 3389) on software that is end-of-life; worst version-matched vulnerability scores CVSS 7.2.'")],
+     ("contract", "extra"), False, "exposure phrase"),
+    ("fallback not applied: two signals named and a why of 49 words (Delta)", [q("Delta Stores", f"top_signals = 'kev_exposed,exposed_and_outdated', why = '1 host {KEV_PHRASE}; "
+                                                                                    f"{EXPOSED.format(ports='RDP 3389')}. Only one host seen. {CLAUSE}'")], ("contract", "extra"), False, "at most 40 words"),
+    ("fallback applied where it is not needed: Kappa (27 words) keeps one signal", [q("Kappa Bank", f"top_signals = 'exposed_and_outdated', why = '{KAPPA_HEAD}.'")], ("extra",), False, ""),
+    ("fallback applied but the second signal still named in the why (Delta)", [q("Delta Stores", f"why = '1 host {KEV_PHRASE}; worst version-matched vulnerability scores CVSS 9.9. Only one host seen. {CLAUSE}'")],
+     ("extra",), False, ""),
     ("old KEV wording", [q("Acme Retail", f"why = '2 hosts {OLD_KEV}; 24 IPs in the footprint. {CLAUSE}'")], ("contract", "extra"), False, ""),
     ("old CVSS wording (worst vulnerability scores)", [q("Kappa Bank", f"why = '{KAPPA_HEAD}; worst vulnerability scores CVSS 7.2.'")], ("contract", "extra"), False, ""),
     ("why states a territory country as a reason", [q("Kappa Bank", f"why = '{KAPPA_HEAD}; hosts located in US.'")], ("contract", "extra"), False, ""),
@@ -217,11 +252,11 @@ MUTATIONS = [
     ("why naming a signal the company does not have, top_signals also changed",
      [q("Kappa Bank", f"top_signals = 'exposed_and_outdated,legacy_tls', why = '{KAPPA_HEAD}; 2 hosts still offering old TLS versions.'")], ("contract", "extra"), False, ""),
     ("why naming a signal the company does not have, top_signals unchanged", [q("Kappa Bank", f"why = '{KAPPA_HEAD}; 2 hosts on end-of-life software.'")], ("extra",), False, ""),
-    ("why with a wrong CVSS number", [q("Iota Works", f"why = 'Worst version-matched vulnerability scores CVSS 9.8; database, medical or IoT systems in the stack. {SKIP}'")],
+    ("why with a wrong CVSS number", [q("Iota Works", f"why = 'Worst version-matched vulnerability scores CVSS 9.8; database, medical or IoT systems in the stack. {SKIP_SIG_Q}'")],
      ("extra",), False, ""),
     ("why with a wrong host count", [q("Acme Retail", f"why = '5 hosts {KEV_PHRASE}; 24 IPs in the footprint. {CLAUSE}'")], ("extra",), False, ""),
     ("why cap clause does not match cap_reasons",
-     [q("Delta Stores", f"why = '1 host {KEV_PHRASE}; an exposed admin or database service (RDP 3389) on outdated software. {OPC} {CLAUSE}'")], ("extra",), False, ""),
+     [q("Delta Stores", f"why = '1 host {KEV_PHRASE}. {OPC} {CLAUSE}'")], ("extra",), False, ""),
     ("why states a breach", [q("Kappa Bank", f"why = '{KAPPA_HEAD}; breach detected.'")], ("contract", "extra"), False, ""),
     ("why shows a formula", [q("Kappa Bank", f"why = '{KAPPA_HEAD}; score=34.'")], ("contract", "extra"), False, ""),
     ("why shows a column name", [q("Kappa Bank", f"why = '{KAPPA_HEAD}; kev_exposed true.'")], ("contract", "extra"), False, ""),
@@ -243,6 +278,14 @@ MUTATIONS = [
     ("carried host_count differs from signals", [q("Kappa Bank", "host_count = 3")], ("contract",), False, ""),
     ("file not sorted by contact_score", [], ("extra",), True, ""),
 ]
+EXTRA_NEEDLES = {"old tie order (host_count before the operator flag): the 5-host flagged account and the 4-host account kept, Tau out": "review cut",
+                 "flagged first (operator flag descending): the flagged account and Tau kept, Upsilon out": "review cut",
+                 "kev_host_count ignored: the 4-host and 3-host accounts kept, Tau (2 KEV hosts) out": "review cut",
+                 "a flagged account kept at the cut over an unflagged one with the same scores (Rackhost in, Upsilon out)": "review cut",
+                 "file sorted in the D11 order (host_count before the operator flag and kev_host_count)": "file order",
+                 "the old exposure phrase 'on outdated software' (D12.3)": "why on every account",
+                 "fallback not applied: two signals named and a why of 49 words (Delta)": "independent recompute",
+                 "fallback applied where it is not needed: Kappa (27 words) keeps one signal": "independent recompute"}
 
 
 class UnitTests(unittest.TestCase):
@@ -253,23 +296,50 @@ class UnitTests(unittest.TestCase):
         self.assertEqual([extra.round_half_up(Fraction(v)) for v in ("5/2", "75/2", "12/5", "0")], [3, 38, 2, 0])
 
     def test_reference_matches_every_hand_computed_case(self):
-        """The independent reference reproduces the hand-computed scores, caps, top_signals and final bands (top-N, N = TEST_N) of all 18 synthetic accounts."""
+        """The independent reference reproduces the hand-computed scores, caps, top_signals and final bands (top-N, N = TEST_N) of all 21 synthetic accounts."""
         refs, stats = extra.reference_all([c[0] for c in CASES], TEST_N)
         for s, fit, urgency, contact, top, uncapped, caps, band, _why in CASES:
             name = s["company_name"]
-            want = ("review" if name == TIE_WINNER else "skip") if band == "AUTO" else band
+            want = band
             with self.subTest(name=name):
                 ref = refs[s["company_id"]]
                 self.assertEqual((ref["fit_score"], ref["urgency_score"], ref["contact_score"], ref["band_uncapped"], ref["cap_reasons"], ref["band"]),
                                  (fit, urgency, contact, uncapped, caps, want))
                 self.assertEqual(ref["top_signals"], top.split(",") if top else None)
         self.assertEqual((stats["would_be_contacts"], stats["top_n_only"], stats["cut_score"], stats["tie_size"], stats["tie_kept"], stats["tie_to_skip"], stats["accounts_above_cut"]),
-                         (4, 4, 25, 3, 2, 1, 6))
+                         (4, 4, 25, 6, 2, 4, 6))
 
-    def test_tie_winner_is_the_lower_account_id(self):
-        """Beta Singleton and Mu Single Honey differ only in account_id; the lower id is kept (hand rule: account_id ascending)."""
-        ids = {c[0]["company_name"]: c[0]["company_id"] for c in CASES}
-        self.assertLess(ids[TIE_WINNER], ids[TIE_LOSER])
+    def test_d12_order_keeps_unflagged_then_kev_then_hosts(self):
+        """The two tie slots go to Tau (2 KEV hosts) and Upsilon (4 hosts); the D11 order, flagged first and ignoring kev_host_count each pick a different pair (hand rule, D12.1)."""
+        sigs = [c[0] for c in CASES]
+        by_id = {s["company_id"]: s for s in sigs}
+        refs, stats = extra.reference_all(sigs, TEST_N)
+        self.assertEqual(sorted(by_id[i]["company_name"] for i in stats["kept_ids"]), sorted(TIE_KEPT))
+        old, _ = extra.review_selection(refs, by_id, TEST_N, order=extra.rank_order_d11)
+        tie = {c[0]["company_name"] for c in CASES if c[3] == 25}
+        self.assertEqual({by_id[i]["company_name"] for i in old} & tie, {"Rackhost Zrt", "Upsilon Duo"})
+
+    def test_rank_order_is_the_d12_key(self):
+        """The key is contact desc, urgency desc, flag false first, kev_host_count desc (null as 0), host_count desc, account_id asc, hand-built for one account."""
+        s = sig("Key Case", "US", hosts=7, ips=7, kev=3, t1=True)
+        self.assertEqual(extra.rank_order({"contact_score": 25, "urgency_score": 50}, s), (-25, -50, True, -3, -7, s["company_id"]))
+        s["kev_host_count"] = None
+        self.assertEqual(extra.rank_order({"contact_score": 25, "urgency_score": 50}, s)[3], 0)
+
+    def test_fallback_applies_only_over_40_words(self):
+        """Delta (two signals would be 49 words) keeps one signal; Kappa (27 words) keeps two; the recount of the kept why is at most 40."""
+        refs, _ = extra.reference_all([c[0] for c in CASES], TEST_N)
+        by_name = {c[0]["company_name"]: (c[0], refs[c[0]["company_id"]]) for c in CASES}
+        self.assertEqual((by_name["Delta Stores"][1]["fallback"], by_name["Delta Stores"][1]["top_signals"]), (True, ["kev_exposed"]))
+        self.assertEqual((by_name["Kappa Bank"][1]["fallback"], by_name["Kappa Bank"][1]["top_signals"]), (False, ["exposed_and_outdated", "max_cvss_band"]))
+        self.assertEqual(extra.expected_words(["kev_exposed", "exposed_and_outdated"], by_name["Delta Stores"][0], by_name["Delta Stores"][1], "review"), 49)
+
+    def test_skip_clause_follows_the_kept_signals(self):
+        """A skip row keeps the D12.2 clause only when a kept signal is kev_exposed or max_cvss_band; the word counts are 13 and 4 (D12.2 says 12; the sentence has 13)."""
+        self.assertEqual((len(SKIP_SIG.split()), len(SKIP.split())), (13, 4))
+        for name, wanted in (("Beta Singleton", SKIP_SIG), ("Iota Works", SKIP_SIG), ("Eta Shell", SKIP), ("Theta Systems", SKIP), ("Lambda Legacy", SKIP)):
+            why = next(c[8] for c in CASES if c[0]["company_name"] == name)
+            self.assertTrue(why.endswith(wanted), name)
 
     def test_top_n_cases(self):
         """N smaller than the would-be contacts keeps every would-be contact; the floor stops a large N; excluded accounts take no slot."""
@@ -277,7 +347,7 @@ class UnitTests(unittest.TestCase):
         refs, stats = extra.reference_all(sigs, 2)
         self.assertEqual((sum(1 for r in refs.values() if r["band"] == "review"), stats["top_n_only"], stats["cut_score"]), (4, 0, None))
         refs, stats = extra.reference_all(sigs, 1000)
-        self.assertEqual((sum(1 for r in refs.values() if r["band"] == "review"), stats["top_n_only"], stats["cut_score"]), (10, 6, 24))  # 4 would-be + 6 with contact_score >= 20
+        self.assertEqual((sum(1 for r in refs.values() if r["band"] == "review"), stats["top_n_only"], stats["cut_score"]), (13, 9, 24))  # 4 would-be + 9 with contact_score >= 20
         by_name = {c[0]["company_name"]: refs[c[0]["company_id"]] for c in CASES}
         self.assertEqual(by_name["Zeta Honey"]["band"], "exclude")
 
@@ -320,6 +390,9 @@ class UnitTests(unittest.TestCase):
         named, _problems, rest = extra.parse_why(f"1 host {OLD_KEV}", s, {})
         self.assertEqual(named, [])
         self.assertTrue(rest.strip())
+        named, _problems, rest = extra.parse_why(OLD_EXPOSED.format(ports="SSH 22"), sig("U", "US", ports=(22,), eo=True), {22})
+        self.assertEqual(named, [])
+        self.assertTrue(rest.strip())
 
 
 class CleanLayerTests(unittest.TestCase):
@@ -348,12 +421,15 @@ class MutationTests(unittest.TestCase):
     def test_each_mutation_is_caught(self):
         """For each fault the detectors named in MUTATIONS report at least one failed check (the contract one containing the needle when given)."""
         self.assertGreaterEqual(len(MUTATIONS), 10)
-        for name, statements, detectors, reverse, needle in MUTATIONS:
+        self.assertEqual(len({m[0] for m in MUTATIONS}), len(MUTATIONS), "mutation names must be unique (EXTRA_NEEDLES is keyed by name)")
+        for name, statements, detectors, reverse, needle, *old_order in MUTATIONS:
             with self.subTest(fault=name), tempfile.TemporaryDirectory() as tmp:
-                paths = build_layers(tmp, statements, reverse)
+                paths = build_layers(tmp, statements, reverse, bool(old_order))
                 found = {"contract": failures(run_contract(*paths)), "extra": failures(run_extra(*paths))}
                 for detector in detectors:
                     self.assertTrue(found[detector], f"{detector} did not catch: {name}")
+                if name in EXTRA_NEEDLES:
+                    self.assertTrue(any(EXTRA_NEEDLES[name] in n for n in found["extra"]), f"extra caught {name} but not by the check containing {EXTRA_NEEDLES[name]!r}: {found['extra']}")
                 if needle and "contract" in detectors:
                     self.assertTrue(any(needle in n for n in found["contract"]), f"contract caught {name} but not by the rule containing {needle!r}: {found['contract']}")
 
