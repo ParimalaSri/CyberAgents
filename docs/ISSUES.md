@@ -390,3 +390,54 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 - Root cause (hypothesis, labelled): the 40-word limit (D9.6 item 7) against a phrase plus the D10 clause and an operator clause.
 - Fix: none by DQ; for the senior engineer: shorten the phrase or the D10 clause, raise the limit, or accept. Fallback correctness: my independent recount of every why (phrase and clause words) equals the stored word count on all 5,790 rows, the fallback is applied on exactly the 8 rows where the two-signal why would pass 40 words and on no other.
 - Contract rule: `check_accounts_extra.py` recomputes the two-signal word count and the fallback per account (top_signals must equal the recomputed, fallback-applied list) and recounts the words of every why; mutations caught: fallback not applied (two signals, 49 words), fallback applied where it is not needed, second signal still named after the fallback. The 40-word SQL rule in accounts.yml is unchanged.
+
+## PIPE-008 Stage 1 dedupe tie-break was not total (QA finding 1; latent non-determinism)
+- Symptom: two raw rows with the same (host_ip, port, transport) and timestamp that differ only in vulns or hostnames gave different output depending on input order (QA case E08: 2 distinct outputs over 6 shuffles, max_cvss 9.8 vs 2.0). Not triggered on the 100K sample.
+- Root cause: `row_number()` ordered by timestamp, then a hash of only org, isp, product, version, shodan_module, cert_subject_o and tags; every other kept column was left to scan order.
+- Fix: the hash now covers every kept output column except name_norm (derived), dup_count (a window count) and timestamp (already a sort key). The sample output is unchanged (97,758 rows, ordered hash equal to the stored file).
+- Contract rule / test: `test_1_clean.QaFixTests.test_dedupe_tie_total_over_every_column` (all 6 input orders give one output) and mutant M32 (back to the 7-column hash). No data-layer rule is possible: the file is deterministic once the tie-break is total.
+
+## PIPE-009 Zero-row batches crashed every stage after the output was written (QA finding 2)
+- Symptom: empty input, all-noise, all-infrastructure or all-null-org input exited 1 (ZeroDivisionError in the stage 1 and 2 reports, `sum()` NULL in the stage 2 and 3 assertions, TypeError formatting a NULL mean in `score_distribution.py`).
+- Root cause: divisions by a zero total and `sum()` over zero rows returning NULL.
+- Fix: `percent()` helper in stage 1, `max(total, 1)` guards in the stage 2 report, `coalesce(sum(...), 0)` in stages 2 and 3, and `score_distribution.py` prints "0 rows" and skips the histogram. The assertions stay meaningful (0 = 0).
+- Test: `CliRobustnessTests.test_zero_row_*` in the four stage test files (exit code 0, valid zero-row parquet, "rows: 0" in the report). Known limit: a hosts file with member rows paired with an EMPTY companies file is an inconsistent input and still fails the stage 3 assertion on purpose (QA harness case E23).
+
+## PIPE-010 Stage reports were always written to the committed outputs/dq path (QA finding 3)
+- Symptom: a trial run with a scratch `--output` overwrote the same-day committed report.
+- Root cause: the report path did not depend on `--output`.
+- Fix: `--report` option in stages 2, 3 and 4; with a non-default `--output` and no `--report` the report is written beside the output as `<stage>_stage_report.md`; the default output keeps the committed path (`scripts/path_guard.py: choose_report_path`).
+- Test: `test_report_goes_next_to_scratch_output` and `test_default_output_keeps_committed_report_path` in the stage 2 to 4 test files; `test_path_guard.ReportPathTests`.
+
+## PIPE-011 Test gap: the contact and review band edges were not pinned (QA finding 4, mutant M01)
+- Symptom: mutating `contact_score >= X` to `>` in `band_sql` passed all 101 tests.
+- Root cause: no test had an account exactly at the threshold with N below the would-be count.
+- Fix: `test_4_score.BandEdgeTests` (five accounts at score 8, `--contact 8 --review 1 --review-n 1`; contact 9; review floor 8 and 9).
+
+## PIPE-012 Test gap: certificate year edges were not pinned (QA finding 5, mutants M22 and M23)
+- Symptom: moving the window to 1991 or 2099 passed all tests (they used years 4096, 0001 and 1970 only).
+- Fix: `test_1_clean.QaFixTests.test_certificate_year_edges` (1990 and 2100 kept; 1989 and 2101 nulled and flagged invalid).
+
+## PIPE-013 Tests derived their expected values from the constants under test (QA finding 6, mutants M07, M11, M12, M24)
+- Symptom: changing the vuln cap to 51, a risky port (2375, 6379) or the why limit to 41 passed all tests.
+- Fix: literal-pinned tests: `test_1_clean.QaFixTests.test_vuln_cap_literal_values` (49, 50, 51, 5000 CVEs), `test_3_signals.PinnedSpecTests` (ten risky ports and 17 non-risky), `test_4_score.WhyLimitTests` (a 40-word why kept, a would-be 41-word why cut to one signal).
+
+## PIPE-014 A non-ASCII name crashed the stage report under the Windows pipe encoding (QA finding 7)
+- Symptom: with cp1252 stdout a CJK org raised UnicodeEncodeError in the stage 1 report after the parquet was written.
+- Root cause: reports print raw names and the default pipe encoding cannot represent them (same cause as PIPE-007).
+- Fix: every stage calls `path_guard.use_utf8_output()` (stdout and stderr to UTF-8, errors replaced) at the start of `main`.
+- Test: `test_cjk_*_under_cp1252_pipe` in the four stage test files (subprocess with PYTHONIOENCODING=cp1252).
+
+## PIPE-015 No stage refused an output path under data/raw or the source dataset folder (QA finding 8)
+- Symptom: only `scripts/build_spread_sample.py` checked the output path.
+- Fix: `scripts/path_guard.py` (`check_output_path`: resolves `..`, case-insensitive, `data/raw` and `D:/Cyber_DataSet/`), called by stages 1 to 4 for the output and the report path and by `build_spread_sample.py` in addition to its existing check.
+- Test: `test_output_under_raw_or_dataset_folder_refused` in the four stage test files (plain, `..`, upper case, dataset folder) and `scripts/test_path_guard.py`.
+
+## PIPE-016 Threshold validation in stage 4 was a bare assert (QA finding 9)
+- Symptom: `python -O` removed the checks; without -O a failure printed a traceback; the negative `--review-n` refusal had no test.
+- Fix: `parser.error` in `main` for `--review` not below `--contact` and for a negative `--review-n` (exit code 2, message); `run_stage` raises ValueError instead of asserting; non-integers are rejected by the argument parser.
+- Test: `test_4_score.ArgumentErrorTests` (each refusal, also under `python -O`).
+
+## PIPE-017 The stage 4 test run printed a report table to stdout (QA finding 10)
+- Symptom: `scripts.test_4_score` printed markdown tables during a normal run.
+- Fix: the tests use a `QuietReport` that collects lines without printing.
