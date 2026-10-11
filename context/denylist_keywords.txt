@@ -2,6 +2,11 @@
 # Rule: a keyword matches when its words appear as a whole-word (word-sequence) run anywhere in the NORMALISED org name or the
 # NORMALISED isp name (scripts/denylist_match.py normalise() then matches_keyword()). It is NOT an arbitrary substring match:
 # "hosting" matches "Krystal Hosting Ltd" but not "webhosting"; "vpn" does not match "vpnsoft".
+# SYNTAX (field scope, RAW-013): one entry per line.
+#   phrase          unscoped: matches in the org text OR the isp text (the original behaviour).
+#   org: phrase     org-scoped: matches in the org text ONLY. Use it where the word is common in CARRIER names (isp text), so that a
+#                   customer sitting behind a telecom carrier is not excluded (for example a company whose isp is "A1 Telekom Austria").
+#   Any other scope word (for example "isp:") is rejected with an error. Callers pass field="org" or field="isp" to matches_keyword.
 # This file lists ONLY keywords that PASSED the precision gate: at least 90% of up to 50 reviewed newly-excluded distinct orgs
 # classified INFRA (ISP, telecom, hosting, VPN, data centre, network provider) from the org name text alone, UNSURE counted as REAL.
 # Gate figures and the keywords that failed are in outputs/denylist_keyword_review.md. Re-run the gate before adding a keyword.
@@ -18,3 +23,19 @@ telecommunications
 cable
 fibre
 dedicated
+# ORG-ONLY entries (gate run on org text only, among rows surviving every other rule; figures in outputs/denylist_orgonly_review.md):
+# gate results (INFRA / reviewed): telecom 49/50, telekom 32/35, telecommunication 20/20, telefonica 20/21, telephone 20/20,
+# telecomunicacoes 25/27, telecoms 3/3, telkom 5/5, telcom 4/4, accented telefônica 1/1 and telefónica 3/3 (normalise() does not fold accents,
+# so these are separate spellings). Failed and not applied: telecomunicaciones 13/19, telecomunicações 13/15, telecomunicazioni 2/5,
+# telekommunikation 5/6, telekomunikasi 2/3, telco 0/1.
+org: telecom
+org: telekom
+org: telecommunication
+org: telefonica
+org: telephone
+org: telecomunicacoes
+org: telecoms
+org: telkom
+org: telcom
+org: telefônica
+org: telefónica

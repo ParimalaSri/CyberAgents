@@ -32,8 +32,40 @@ def run_tests():
         matches(norm("Hosting.de GmbH"), kw) == "hosting",
     ]
     loaded = dm.load_keywords()
-    cases.append(len(loaded) == len(set(loaded)) and "vpn" in loaded and "telecom" not in loaded)
+    cases.append(len(loaded) == len(set(loaded)) and "vpn" in loaded and not [k for k in loaded if k == "telecom" and k.scope == "any"])
     cases.append(dm.matches_prefix(norm("Weebly, Inc."), dm.load_prefixes()) == "weebly")
+    scoped = [dm.parse_keyword_entry("org: telecom"), dm.parse_keyword_entry("hosting")]
+    cases.append(scoped[0] == "telecom" and scoped[0].scope == "org" and scoped[1].scope == "any")
+    cases.append(matches(norm("Bretagne Telecom"), scoped) == "telecom")
+    cases.append(matches(norm("Bretagne Telecom"), scoped, field="org") == "telecom")
+    cases.append(matches(norm("A1 Telekom Telecom Austria"), scoped, field="isp") is None)
+    cases.append(matches(norm("Krystal Hosting Ltd"), scoped, field="isp") == "hosting")
+    cases.append(matches(norm("Krystal Hosting Ltd"), scoped, field="org") == "hosting")
+    cases.append(matches(norm("Acme Telecommunications"), scoped) is None)
+    cases.append(matches(norm("Plain Telecom"), ["telecom"], field="isp") == "telecom")
+    cases.append(dm.parse_keyword_entry("ORG:  Tele Com ") == "tele com")
+    try:
+        dm.parse_keyword_entry("isp: telecom")
+        cases.append(False)
+    except ValueError:
+        cases.append(True)
+    try:
+        matches("x", kw, field="cert")
+        cases.append(False)
+    except ValueError:
+        cases.append(True)
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "kw.txt"
+        path.write_text("# c\nhosting\norg: telecom\norg: telecom\ntelecom\n", encoding="utf-8")
+        loaded_tmp = dm.load_keywords(path)
+        cases.append([(str(k), k.scope) for k in loaded_tmp] == [("hosting", "any"), ("telecom", "org"), ("telecom", "any")])
+        path.write_text("bogus: telecom\n", encoding="utf-8")
+        try:
+            dm.load_keywords(path)
+            cases.append(False)
+        except ValueError:
+            cases.append(True)
     for number, ok in enumerate(cases, 1):
         check(ok, "case " + str(number))
     return len(cases)

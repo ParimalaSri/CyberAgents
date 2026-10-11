@@ -44,13 +44,40 @@ def load_prefixes(path=None):
     return result
 
 
+KEYWORD_SCOPES = ("org",)
+KEYWORD_FIELDS = ("org", "isp")
+
+
+class Keyword(str):
+    """A normalised keyword phrase (a str) that also carries its field scope: 'any' (org or isp) or 'org' (org text only)."""
+
+    scope = "any"
+
+
+def parse_keyword_entry(entry):
+    """Parse one keyword line, 'phrase' or 'scope: phrase', into a Keyword; reject unknown scopes."""
+    scope = "any"
+    text = entry
+    if ":" in entry:
+        head, _, rest = entry.partition(":")
+        scope = head.strip().lower()
+        text = rest
+        if scope not in KEYWORD_SCOPES:
+            raise ValueError("unknown keyword scope " + repr(scope) + " in line: " + entry)
+    keyword = Keyword(normalise(text))
+    keyword.scope = scope
+    return keyword
+
+
 def load_keywords(path=None):
-    """Return normalised keyword phrases (whole-word match rules), de-duplicated in file order."""
+    """Return Keyword phrases (whole-word match rules, optional 'org:' scope), de-duplicated by phrase and scope in file order."""
     result = []
+    seen = set()
     for entry in read_entries(path or CONTEXT_DIR / "denylist_keywords.txt"):
-        phrase = normalise(entry)
-        if phrase and phrase not in result:
-            result.append(phrase)
+        keyword = parse_keyword_entry(entry)
+        if keyword and (str(keyword), keyword.scope) not in seen:
+            seen.add((str(keyword), keyword.scope))
+            result.append(keyword)
     return result
 
 
@@ -67,10 +94,14 @@ def matches_prefix(normalised, prefixes):
     return None
 
 
-def matches_keyword(normalised, keywords):
-    """Return the first keyword whose words appear as a whole-word run in the normalised text, else None."""
+def matches_keyword(normalised, keywords, field="org"):
+    """Return the first keyword whose words appear as a whole-word run in the text of `field` ('org' or 'isp'), else None; org-scoped keywords only match field 'org'."""
+    if field not in KEYWORD_FIELDS:
+        raise ValueError("field must be one of " + ", ".join(KEYWORD_FIELDS))
     padded = " " + normalised + " "
     for keyword in keywords:
+        if getattr(keyword, "scope", "any") == "org" and field != "org":
+            continue
         if " " + keyword + " " in padded:
             return keyword
     return None

@@ -99,9 +99,16 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
   chinanet, hosting, vpn, internet service provider, broadband, web hosting, vps, telecommunications, cable, fibre, dedicated. `weebly` and `jimdo` added
   to the prefix list (D2). Effect on the spread sample: infrastructure 87.63% to 88.80%, surviving 12.37% to 11.20%, surviving distinct orgs 5,519 to 5,113,
   1,170 rows newly excluded. Details: `outputs/denylist_keyword_review.md`.
-- What remains: (1) 18 candidates failed the gate and are not applied, including telecom (84.0%), telekom (54.0%), communications (78.0%), isp, idc, fiber,
-  mobile, cloud, internet, network. Their REAL examples are mostly real customers behind a telecom carrier matched via the isp text; an org-only scope might
-  pass but needs a code change and its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr
+- Update 2026-10-11, branch `feat/data-integrator/org-only-keywords` (proposed): field-scoped keywords added (`org: phrase` = org text only; unscoped
+  unchanged; unknown scope rejected; 28 test cases pass). Org-only gate passed for telecom 49/50, telekom 32/35, telecommunication 20/20, telefonica 20/21,
+  telephone 20/20, telecomunicacoes 25/27, telecoms 3/3, telkom 5/5, telcom 4/4, accented telefônica 1/1 and telefónica 3/3; failed: telecomunicaciones 13/19,
+  telecomunicações 13/15, telecomunicazioni 2/5, telekommunikation 5/6, telekomunikasi 2/3, telco 0/1. Effect (spread sample): infrastructure 88.80% to
+  89.45% (88,802 to 89,446 rows), surviving 11,198 to 10,554, surviving distinct orgs 5,112 to 4,838. The 32-row gap (profile 12,336 vs 12,368) is the 32
+  survivors with null `ip_str` (IPv6) dropped by NULL logic in the profile query (strongly supported, not proven). Details: `outputs/denylist_orgonly_review.md`.
+  Still open: accent variants are separate spellings because `normalise()` does not fold accents; one-word compound brands (rostelecom, kazakhtelecom) not matched.
+- What remains: (1) 18 candidates failed the gate in the first round and are not applied, including communications (78.0%), isp, idc, fiber,
+  mobile, cloud, internet, network (telecom and telekom are now handled org-only, see the update above); an org-only scope for the others might pass
+  but needs its own review (owner decision). (2) Classification was from org names only, by one reviewer. (3) Automattic / Tumblr
   (49 rows) not added: owner to say whether WordPress.com counts as a website builder. (4) The rules are not enforced anywhere yet: `check_contract.py` still
   understands only the exact list (RAW-010) and does not apply prefix, pattern or keyword rules. (5) Not yet run on the full file.
 - Contract rule: companies row share outside 5-20% flagged (already planned); keyword-leakage check once `check_contract.py` calls `matches_keyword`.
