@@ -21,7 +21,7 @@ Read these first, before doing any task:
 4. `docs/BACKLOG.md` (what is done and what is next)
 
 Then run `git branch --show-current`. If on `dev` or `prod`, create a feature
-branch before changing anything (see section 7).
+branch before changing anything.
 
 ## 3. Data flow
 ```
@@ -41,61 +41,41 @@ If a stage is wrong, rerun that stage only.
 - Streamlit for the UI, hosted on Streamlit Community Cloud (deploys from `prod`)
 - Git/GitHub with protected `dev` and `prod` branches
 
-## 5. The team (subagents)
-The main Claude session is the orchestrator ("head of data"). It reads this file,
-picks the next task, and delegates to one agent at a time. Subagents cannot talk
-to each other. They hand work over through FILES (contracts, reports, PRs), and
-the main session routes between them.
-
-| Agent | Job | Level |
-|---|---|---|
-| `data-integrator` | Ingest raw data, profile it, document the schema | Junior |
-| `data-engineer` | Build pipeline stages (clean, companies, signals, score) | Junior |
-| `llm-engineer` | Prompts, `llm/client.py`, tracing, prompt versions, cost wrapper | Junior |
-| `app-developer` | Streamlit UI (uses `frontend-design` skill) | Junior |
-| `data-analyst` | Scoring calibration, band and segment analysis | Mid |
-| `data-quality-engineer` | Owns data contracts, runs data checks, owns `docs/ISSUES.md` | Mid |
-| `qa-engineer` | Unit tests, eval harness, regression runs. Tests code and LLM behaviour | Mid |
-| `security-reviewer` | Scans PRs for secrets, committed data, unsafe prompts, PII. Read-only | Reviewer |
-| `sales-team` | Simulated end user: usability feedback, outreach drafts. Not ground truth | Read-mostly |
-| `release-engineer` | Prepares the dev to prod promotion checklist | Senior-controlled |
-| `senior-data-engineer` | Reviews PRs, owns architecture and cost docs, recommends approve or changes | Senior |
-| `tech-writer` | Docs, README, reflection draft | Junior |
-
-Core set to build first: `data-engineer`, `llm-engineer`, `data-quality-engineer`,
-`qa-engineer`, `senior-data-engineer`, `sales-team`. Add the others only when a
-PR needs them.
-
-### Ownership rules
-- **Data correctness** belongs to `data-quality-engineer`. **Code and LLM
-  behaviour** belongs to `qa-engineer`. **Design and merge recommendation**
-  belongs to `senior-data-engineer`.
-- The author of a change never validates it. Reviewers never fix what they
-  review. They return PASS or FAIL with evidence.
-- Reviewer agents are read-only on pipeline code. `data-quality-engineer` may
-  write only to `context/contracts/`, `outputs/dq/`, `docs/ISSUES.md`, and its
-  own check scripts.
-- `sales-team` output is never used as eval ground truth.
-- Do not run agents in parallel on dependent stages. Parallel is fine only for
-  independent work (profiling column groups, docs while evals run).
+## 5. Hard rules (never break these)
+- NEVER commit, push, merge or rebase on `dev` or `prod`. Work on `feat/<role>/<task>`
+  branched from `dev`. Agents open PRs; a human merges.
+- NEVER edit or print `.env`. Never commit `.env`, `data/`, or `traces/`.
+  NEVER modify files in `data/raw/`.
+- If a hook blocks you, stop and tell me; do not work around it. Fix linter
+  feedback; do not silence it.
+- **Rules first.** Scoring, banding, filtering and entity grouping are
+  deterministic code. The LLM is only for the ambiguous "review" band and text
+  generation.
+- ALL LLM calls go through `llm/client.py`. Prompts live in `prompts/<feature>/vN.md`;
+  never overwrite an old version.
+- Develop on the 100K sample first. Verify every stage's output; running without
+  errors does not mean correct.
+- The author of a change never validates it. Reviewers return PASS or FAIL with evidence.
+- Don't add MCP servers. Don't create files outside the folder map without asking.
+- Labels in `evals/labeled.jsonl` are mine. Never overwrite them.
 
 ## 6. Folder map
 ```
 .claude/
-  agents/        one .md per agent above
-  commands/      slash commands that call skills (/run-stage, /review-layer, /run-evals)
-  skills/        SKILL.md workflows (see list below)
+  agents/        one .md per agent
+  commands/      slash commands (/run-stage, /review-layer, /run-evals)
+  skills/        SKILL.md workflows
+  rules/         path-scoped rules (llm, pipeline, code-style); load when matching files are touched
   hooks/         protect_files.py, branch_guard.py, log_changes.py, lint_check.py
   logs/          changes.jsonl (every Claude edit/command; gitignored)
   settings.json  permissions + hooks
 pyproject.toml   ruff config (naming + docstring rules)
 .github/         pull_request_template.md, CODEOWNERS
-context/         business, ICP, signal glossary, schema
+context/         business, ICP, schema, data_notes, denylists
   contracts/     data contracts per layer (hosts, companies, signals, accounts)
 reference/       task brief, sample records, reference architecture notes
 scripts/         shared utilities (data download, helpers)
 data/            raw/ silver/ gold/ sample/  (gitignored, regenerated by pipeline)
-                 raw = bronze (never modified); sample/ = spread dev sample built from raw
 pipeline/        1_clean, 2_companies, 3_signals, 4_score
 llm/             client.py (the ONLY place that calls the API), adjudicate.py
 prompts/         versioned prompts: account_scoring/v1.md, v2.md, ...
@@ -103,112 +83,21 @@ evals/           labeled.jsonl, run_eval.py, results/
 traces/          dev.jsonl, prod.jsonl (every LLM call)
 app/             streamlit_app.py
 outputs/         generated reports; outputs/dq/ holds data quality reports
-docs/            PLANNING, ARCHITECTURE, HOW_I_BUILD, ISSUES, BACKLOG
+docs/            PLANNING, ARCHITECTURE, HOW_I_BUILD, ISSUES, BACKLOG, TEAM, GIT_WORKFLOW
 ```
 
-### Skills (each lives in `.claude/skills/<name>/SKILL.md`)
-Build the required ones first, add the rest when the workflow has been run by
-hand once.
-- Required: `data-profiling`, `pipeline-stage-build`, `data-quality-check`,
-  `scoring-calibration`, `account-scoring`, `outreach-draft`
-- Later: `data-contract`, `eval-run`, `prompt-version`, `cost-report`,
-  `entity-resolution`, `signal-engineering`, `architecture-review`
-- Skills may contain `references/` and `scripts/`. Only `SKILL.md` is mandatory.
+## 7. Where to look (read when the task needs it)
+| Topic | File |
+|---|---|
+| Subagents, ownership rules, skills list | `docs/TEAM.md` |
+| Branches, PR checks, dev to prod, who can merge | `docs/GIT_WORKFLOW.md` |
+| LLM calls, tracing, cost ceiling, evals | `.claude/rules/llm.md` |
+| Pipeline, data quality, contracts, ISSUES | `.claude/rules/pipeline.md` |
+| Naming, docstrings, ruff | `.claude/rules/code-style.md` |
+| Source data facts, known data issues, key columns | `context/data_notes.md` |
+| Scoring model, weights, bands, decisions D1-D4 | `docs/ARCHITECTURE.md` |
 
-## 7. Git workflow and access
-```
-prod   protected. Hosted app deploys from here. Merge only via PR from dev.
-dev    protected. Integration and testing. Merge only via PR from feature branches.
-feat/<role>/<task>   where work happens, always branched from dev.
-```
-- NEVER commit, push, merge or rebase on `dev` or `prod`. Work on a feature branch.
-- Open PRs with `gh pr create --base dev` using the PR template.
-- Required checks on a PR into `dev`: data-quality-engineer PASS (when pipeline
-  or data is touched), qa-engineer PASS (when code or prompts are touched),
-  security-reviewer clean, senior-data-engineer recommendation.
-- Before dev to prod: data-quality-engineer PASS on the FULL dataset (not the
-  sample), evals not regressed, cost within ceiling, docs updated.
-- **AI agents open PRs and comment on them. A human merges**, especially into
-  `prod`. Agents never merge their own or another agent's PR.
-- No hotfixes straight to `prod`. Fixes go through `dev`.
-- Environments: dev uses the 100K sample and a small cost ceiling; prod uses the
-  full scored extract. Traces go to `traces/dev.jsonl` or `traces/prod.jsonl`.
-
-| Role group | Feature branch | PR to dev | Merge | Edit .env |
-|---|---|---|---|---|
-| Junior and mid agents | yes (own branch) | yes | no | no |
-| Reviewer agents (security, sales) | no | no | no | no |
-| release-engineer | no | prepares dev to prod PR | no | no |
-| senior-data-engineer | yes | yes | recommends only | no |
-| Human owner (me) | yes | yes | yes | yes |
-
-## 8. Rules and guardrails
-
-### Architecture
-- **Rules first.** Scoring, banding, filtering and entity grouping are
-  deterministic code (SQL/DuckDB/Python). The LLM is used ONLY for judgement on
-  the ambiguous "review" band, and for text generation (summaries, outreach).
-- Every account must have a `why` explanation a salesperson can read directly.
-- Prefer precision over recall when grouping rows into companies. Report the
-  unresolved percentage openly. Do not hide it.
-
-### LLM calls
-- ALL LLM calls go through `llm/client.py`. Never call the API anywhere else.
-- Every call is logged to `traces/<env>.jsonl` with: timestamp, request,
-  response, model, prompt_version, input_tokens, output_tokens, latency_ms,
-  cost_usd, decision, account_id.
-- Prompts live in `prompts/<feature>/vN.md`. Never inline prompt text in code.
-  New prompt = new version file. Never overwrite an old version.
-- Use the cheapest model that works: Haiku for classification, Sonnet for drafting.
-- Enforce a per-run cost ceiling in code. Abort if exceeded.
-- LLM output must be validated JSON. Retry once on failure, then mark `needs_human`.
-
-### Data and pipeline
-- Develop on a SAMPLE (100K rows) first. Run the full dataset only after the
-  sample output has been checked.
-- After EVERY stage print: row count, null rates for key columns, and 5 random
-  sample rows. Compare row count to the previous layer and explain differences.
-- A pipeline that runs without errors can still be wrong. Verify outputs.
-
-### Data quality
-- Every layer has a contract in `context/contracts/<layer>.yml` (columns, types,
-  key uniqueness, allowed ranges). `data-quality-check` runs against it.
-- Always check: `companies <= hosts`; signals row count equals companies row
-  count (join fan-out); no hyperscaler, CDN or ISP names as companies (denylist
-  leakage); scores within 0 to 100; every account has a band and a non-empty `why`.
-- Every bug found goes into `docs/ISSUES.md` with symptom, root cause, fix, and
-  the contract rule that now catches it.
-- Quality reports are saved to `outputs/dq/<layer>_<date>.md`.
-
-### Code style (enforced by `.claude/hooks/lint_check.py` and ruff)
-- Every function and class has a ONE-LINE docstring saying what it does.
-- Naming: `snake_case` for files, functions, variables; `PascalCase` for classes;
-  `UPPER_SNAKE` for constants. Pipeline stages are `N_name.py` (`1_clean.py`).
-  Prompts are `prompts/<feature>/vN.md`. Branches are `feat/<role>/<task>`.
-- Use the same name for the same concept across all layers (e.g. `company_id`,
-  `account_id`). Do not invent synonyms.
-- Fix hook feedback before moving on. Do not silence the linter.
-
-### Safety
-- NEVER edit or print `.env`. Never commit `.env`, `data/`, or `traces/`.
-- Enforced by `.claude/settings.json` (deny rules) and hooks `protect_files.py`
-  and `branch_guard.py`. If a hook blocks you, stop and tell me; do not work
-  around it.
-- Every edit and shell command is logged to `.claude/logs/changes.jsonl`
-  (local, gitignored) by `log_changes.py`.
-- NEVER modify files in `data/raw/`.
-- Don't add MCP servers. They are not needed and cost context.
-- Don't create files outside the folder map without asking.
-
-## 9. Evals
-- The labelled set (`evals/labeled.jsonl`, 20 to 30 examples) is labelled BY ME.
-  Claude may suggest candidate labels with reasoning, but the final label is
-  mine. Do not overwrite labels.
-- `python evals/run_eval.py --prompt v2 --baseline v1` prints precision, recall,
-  and a comparison against the previous prompt version, and saves to
-  `evals/results/`.
-
-## 10. Working style
+## 8. Working style
 - Use plan mode for anything with multiple steps. Show the plan before building.
 - Spec, then to-do per milestone, then build one milestone at a time.
 - One task per prompt. Keep changes small and reviewable.
@@ -217,30 +106,3 @@ feat/<role>/<task>   where work happens, always branched from dev.
 - When something fails, show me the error and the root cause before fixing.
 - Keep a running note of where AI saved time and where it cost time, for
   `docs/HOW_I_BUILD.md`.
-
-## 11. Data notes (fill in after data exploration)
-(Filled from `outputs/profile_sample_100k.md` and decisions D1-D4 in `docs/ARCHITECTURE.md`. Figures are from a head-of-file
-100K sample unless stated; the spread sample (D3) will replace them.)
-- Source: Shodan-style internet-scan dump, JSON Lines, one row per service banner on one IP:port. Local file
-  `D:\Cyber_DataSet\2026-09-14T10-00-00.json.zst` (12.36 GB compressed, about 84.6 GB decompressed, estimated 7.6M to 8.9M rows,
-  about one hour of scanning). Read in place; never copied into the repo. The brief's link is a different snapshot (2026-10-08).
-- Rows / columns: 78 top-level columns; about 25 are common, the rest are sparse protocol structs (over 92% null).
-  Dev sample: `data/sample/` (spread sample, 100K rows). `data/raw/sample_100k.jsonl` is the old head-of-file sample.
-- Key columns for FIT signals: normalised `org` (after denylist), `ssl.cert.subject.O`, `location.country_code`,
-  non-infrastructure `domains`/`hostnames`, `product`/`os`/`cpe23`, tags (`database`, `ics`, `medical`, `iot`).
-- Key columns for URGENCY / risk signals: `vulns` (max CVSS, KEV), `ssl.cert.expired`/`expires`/`versions`, tags
-  `eol-product`/`eol-os`, risky ports. `timestamp` is NOT usable (whole file is about one hour).
-- Known data-quality issues: about 87% of rows belong to cloud, CDN, hosting or ISP organisations; org name variants;
-  587 IPv6 rows with null `ip_str`; about 4% repeated ip:port rows; CVE lists inferred from banner versions;
-  honeypot and RAT noise; certificate date sentinels; port bursts by file position. Full list: `docs/ISSUES.md`.
-- Denylist candidates (most frequent org/ISP/CDN values): `context/denylist.txt` (top: Google LLC, Incapsula Inc,
-  Amazon.com Inc., Aliyun Computing, Cloudflare, Aceville Pte. Ltd., Internet Rimon, Korea Telecom). Decisions D1/D2 keep
-  IBM, Oracle, Microsoft, security vendors and website builders on it.
-
-## 12. Scoring model (fill in after signals are approved)
-- `fit_score` (0-100): <signals and weights>
-- `urgency_score` (0-100): <signals and weights>
-- `contact_score` = <formula>
-- Bands: contact >= <X>, review <Y-X>, skip < <Y>, exclude = <rule>
-- Weights and thresholds are calibrated against my own score distribution and
-  documented in `docs/ARCHITECTURE.md`. Do not copy them from another project.

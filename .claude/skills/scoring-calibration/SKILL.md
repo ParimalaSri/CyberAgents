@@ -27,7 +27,7 @@ Arguments: `$ARGUMENTS`
    `--contact X --review Y` previews and a +/-5 sensitivity table. Show the user.
 4. Wait for approval, then update `pipeline/4_score.py` constants and rerun that stage only.
 5. Record weights, thresholds, band sizes and reasoning in `docs/ARCHITECTURE.md`, and fill
-   CLAUDE.md section 12 after the user approves.
+   the scoring section of docs/ARCHITECTURE.md after the user approves.
 
 ## Outputs
 - Distribution report (console) and a proposed threshold table
@@ -35,7 +35,7 @@ Arguments: `$ARGUMENTS`
 
 ## Rules
 - Weights and thresholds come from this dataset, with written reasons. Never copy another project's.
-- Propose; the user decides. Do not edit CLAUDE.md section 12 unprompted.
+- Propose; the user decides. Do not edit the scoring section of docs/ARCHITECTURE.md unprompted.
 - Do not tune on the labelled eval examples and then report them as the score.
 
 ## Worked example

@@ -233,7 +233,7 @@ Deliberately **not** used as signals:
    capacity, `review` from budget, and set the edges by looking at accounts around each threshold by hand.
 4. Preview thresholds with `--contact X --review Y` and a +/-5 sensitivity table.
 5. The owner approves. Constants go into `pipeline/4_score.py`; weights, thresholds, band sizes and reasons are
-   **recorded in this section afterwards**, and the owner fills CLAUDE.md section 12.
+   **recorded in this section afterwards**, and the owner fills the scoring model in this document.
 6. Never tune on the labelled eval examples and then report them as the score (section 6).
 
 Recorded calibration (PROVISIONAL, from D11; owner-approved: no; capacity, territory, ICP and operator-type reference are all still missing):

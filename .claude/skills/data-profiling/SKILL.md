@@ -1,6 +1,6 @@
 ---
 name: data-profiling
-description: Profile a raw or intermediate data file (row count, null rates, distinct values, top values, sample rows) and document its schema. Use when exploring a new dataset, filling context/schema.md or CLAUDE.md section 11, or finding fit and urgency signal candidates.
+description: Profile a raw or intermediate data file (row count, null rates, distinct values, top values, sample rows) and document its schema. Use when exploring a new dataset, filling context/schema.md or context/data_notes.md, or finding fit and urgency signal candidates.
 argument-hint: <path-to-file> [--sample 100000]
 version: 1.0.0
 ---
@@ -30,7 +30,7 @@ Arguments: `$ARGUMENTS` (file path, optional flags)
 ## Outputs
 - `outputs/profile_<name>.md` (generated, can be regenerated)
 - Draft `context/schema.md`
-- Proposed values for CLAUDE.md section 11 (shown to the user; the user approves before editing)
+- Proposed values for context/data_notes.md (shown to the user; the user approves before editing)
 
 ## Rules
 - Sample first; run the full file only after the sample findings are written up.

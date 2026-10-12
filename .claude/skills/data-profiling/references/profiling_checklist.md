@@ -1,7 +1,7 @@
 # Profiling checklist
 
 Work through this after running `scripts/profile_table.py`. Record findings in
-`context/schema.md` and CLAUDE.md section 11.
+`context/schema.md` and context/data_notes.md.
 
 ## Per column
 - Null rate. Above 50% means the column is probably unusable as a signal.
@@ -14,7 +14,7 @@ Work through this after running `scripts/profile_table.py`. Record findings in
 - Which column(s) could identify a company: organisation name, domain, hostname, ASN, IP owner.
 - What share of rows has a usable organisation value? This is the ceiling for company grouping.
 - Most frequent organisation values. Anything that is a cloud provider, CDN, ISP, hosting company
-  or registrar is NOT a customer. List these as denylist candidates in CLAUDE.md section 11.
+  or registrar is NOT a customer. List these as denylist candidates in context/data_notes.md.
 
 ## Fit candidates (does this company look like our buyer)
 Industry, size proxies (number of hosts, address space), geography, technology stack,
