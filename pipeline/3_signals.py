@@ -172,21 +172,34 @@ def build_signals(con, companies_path):
     )
 
 
+def fail_inconsistent(message):
+    """Exit with exit code 1 and a readable message that says nothing was written."""
+    sys.exit(f"signals stage: inconsistent input, nothing written: {message}")
+
+
 def check_consistency(con, reconcile=True):
-    """Exit with a readable message when the signals table fans out, drops companies or does not reconcile to the member host rows; runs before any write."""
+    """Exit with a readable message when the signals table drops or fans out rows, has repeated keys, wrong columns or types, or does not reconcile; runs before any write."""
     n_comp = con.execute("SELECT count(*) FROM companies").fetchone()[0]
     n_sig = con.execute("SELECT count(*) FROM signals").fetchone()[0]
     uniq = con.execute("SELECT count(DISTINCT company_id) FROM signals").fetchone()[0]
-    if not n_sig == n_comp == uniq:
-        sys.exit(f"signals stage: inconsistent input, nothing written: fan-out or drop: companies {n_comp}, signals {n_sig}, distinct company_id {uniq}")
+    if n_sig != n_comp:
+        fail_inconsistent(f"fan-out or drop: companies {n_comp}, signals {n_sig}")
+    if uniq != n_sig:
+        fail_inconsistent(f"company_id is not unique: signals {n_sig}, distinct company_id {uniq}")
+    described = [(r[0], r[1]) for r in con.execute("DESCRIBE signals").fetchall()]
+    if tuple(name for name, _ in described) != KEY_COLUMNS:
+        fail_inconsistent(f"output columns differ from D9.4: {[name for name, _ in described]}")
+    wrong = [(name, got, want) for (name, got), (_, want) in zip(described, OUTPUT_COLUMNS) if got != want]
+    if wrong:
+        fail_inconsistent(f"output column types differ from D9.4 (column, got, wanted): {wrong}")
     if not reconcile:
         return
     members, counted = con.execute("SELECT count(*), count(*) FILTER (WHERE counted) FROM host_flags").fetchone()
     sum_counted, sum_host = con.execute("SELECT coalesce(sum(counted_host_count), 0), coalesce(sum(host_count), 0) FROM signals").fetchone()
     if sum_counted != counted:
-        sys.exit(f"signals stage: inconsistent input, nothing written: sum(counted_host_count) {sum_counted} != counted member host rows {counted}")
+        fail_inconsistent(f"sum(counted_host_count) {sum_counted} != counted member host rows {counted}")
     if sum_host != members:
-        sys.exit(f"signals stage: inconsistent input, nothing written: sum(host_count) {sum_host} != member host rows {members} (do the hosts and companies files belong together?)")
+        fail_inconsistent(f"sum(host_count) {sum_host} != member host rows {members} (do the hosts and companies files belong together?)")
 
 
 def write_output(con, output_path):
@@ -278,9 +291,7 @@ def section_coverage(con, rep, total):
     members, counted, blind, with_non = con.execute(
         "SELECT (SELECT count(*) FROM host_flags), (SELECT count(*) FROM host_flags WHERE counted), "
         "(SELECT count(*) FROM signals WHERE host_signals_blind), (SELECT count(*) FROM signals WHERE counted_host_count < host_count)").fetchone()
-    assert con.execute("SELECT coalesce(sum(counted_host_count), 0) FROM signals").fetchone()[0] == counted, "sum(counted_host_count) != counted member host rows"
     sum_host = con.execute("SELECT coalesce(sum(host_count), 0) FROM signals").fetchone()[0]
-    assert sum_host == members, f"sum(host_count) {sum_host} != member host rows {members}"
     rep.add(f"Member host rows {members:,} = counted {counted:,} + non-counted (CDN-tagged cert_o) {members - counted:,}; sum(host_count) = {sum_host:,} "
             f"equals member host rows (asserted); sum(counted_host_count) equals counted (asserted). Companies with at least one non-counted host: "
             f"{with_non:,} (D9.4: 192); host-blind companies: {blind:,} (D9.4: 180).")
@@ -309,9 +320,7 @@ def section_output(con, rep, output_path, companies_rows):
     spec.loader.exec_module(report)
     out = Path(output_path).as_posix()
     total = report.count_rows(con, out)
-    assert total == companies_rows, "signals rows != companies rows"
     cols = [r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet('{quote_path(out)}')").fetchall()]
-    assert tuple(cols) == KEY_COLUMNS and len(cols) == 36, "output columns differ from D9.4"
     rep.add(f"\n## 5. Output file\n\nPath: {out}; rows: {total:,}; columns: {len(cols)}. Previous layer (companies rows): {companies_rows:,}; difference 0 (asserted: "
             f"one row per company, company_id unique, no fan-out).\n\nNull rates (all columns, worst first):\n")
     rep.table(("column", "null rate"), [(c, f"{p}%") for c, p in report.null_rates(con, out, KEY_COLUMNS, total)])
@@ -323,7 +332,7 @@ def section_output(con, rep, output_path, companies_rows):
 
 
 def print_report(con, run, output_path, report_path):
-    """Print and save the stage report; assertions fail the run when the arithmetic breaks."""
+    """Print and save the stage report (every reconciliation was already checked before the write)."""
     rep = Report()
     total = run["signals_rows"]
     rep.add(f"# Signals stage report ({datetime.date.today().isoformat()})\n\nInput companies rows: {run['companies_rows']:,}; member host rows aggregated: "

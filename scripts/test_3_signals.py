@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import duckdb
@@ -445,6 +446,86 @@ class CliRobustnessTests(unittest.TestCase):
             self.assertIn("inconsistent input, nothing written", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
             self.assertFalse(out.exists())
+
+class PreWriteConsistencyTests(unittest.TestCase):
+    """Every pre-write consistency check of stage 3 refuses an input that breaks only that check: message, exit code 1, nothing written."""
+
+    def run_checked(self, hosts, companies, expect, tamper=None, retype=None):
+        """Run main in process (optionally tampering with table signals after it is built, or retyping a companies column); assert a clean refusal and no files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts_path, companies_path = write_inputs(tmp, hosts, companies)
+            if retype:
+                con = duckdb.connect()
+                con.execute(f"COPY (SELECT * REPLACE ({retype}) FROM read_parquet('{companies_path.as_posix()}')) "
+                            f"TO '{Path(tmp, 'retyped.parquet').as_posix()}' (FORMAT PARQUET)")
+                companies_path = Path(tmp, "retyped.parquet")
+            out, report = Path(tmp, "o", "signals.parquet"), Path(tmp, "r", "report.md")
+            original = STAGE.build_signals
+
+            def build_then_tamper(con, path):
+                """Build signals, then apply the tampering SQL."""
+                original(con, path)
+                if tamper:
+                    con.execute(tamper)
+
+            with mock.patch.object(STAGE, "build_signals", build_then_tamper), mock.patch.object(STAGE, "write_output") as writer:
+                code, _, _ = GUARD_SUPPORT.run_main(STAGE, ["--hosts", hosts_path, "--companies", companies_path, "--output", out, "--report", report],
+                                                    GUARD_SUPPORT.load_guard())
+            self.assertIsInstance(code, str)
+            self.assertIn("inconsistent input, nothing written", code)
+            self.assertIn(expect, code)
+            writer.assert_not_called()
+            self.assertFalse(out.parent.exists())
+            self.assertFalse(report.parent.exists())
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), sorted(["hosts.parquet", "companies.parquet"] + (["retyped.parquet"] if retype else [])))
+
+    def test_counted_host_mismatch(self):
+        """A companies file that lacks the company the hosts belong to (sum(counted_host_count) != counted member host rows) is refused."""
+        self.run_checked([host("acme")], [("id_zzz", "Zzz", "zzz", 0)], "sum(counted_host_count) 0 != counted member host rows 1")
+
+    def test_host_count_mismatch_alone(self):
+        """A host_count in the companies file that differs from the member host rows (counted hosts still match) is refused."""
+        self.run_checked([host("acme")], [("id_acme", "Acme", "acme", 5)], "sum(host_count) 5 != member host rows 1")
+
+    def test_rows_dropped(self):
+        """A signals table with fewer rows than companies (unique keys) is refused as fan-out or drop."""
+        self.run_checked([host("a"), host("b")], [("id_a", "A", "a", 1), ("id_b", "B", "b", 1)], "fan-out or drop: companies 2, signals 1",
+                         tamper="DELETE FROM signals WHERE name_norm = 'b'")
+
+    def test_rows_fanned_out_with_unique_keys(self):
+        """A signals table with more rows than companies, all company_id distinct, is refused as fan-out."""
+        self.run_checked([host("a")], [("id_a", "A", "a", 1)], "fan-out or drop: companies 1, signals 2",
+                         tamper="INSERT INTO signals SELECT * REPLACE ('id_extra' AS company_id) FROM signals")
+
+    def test_company_id_not_unique_with_equal_row_counts(self):
+        """Two company rows with the same company_id (row counts equal) are refused as not unique."""
+        self.run_checked([host("a"), host("b")], [("id_same", "A", "a", 1), ("id_same", "B", "b", 1)], "company_id is not unique")
+
+    def test_wrong_column_name_refused(self):
+        """A renamed output column is refused before the write."""
+        self.run_checked([host("a")], [("id_a", "A", "a", 1)], "output columns differ from D9.4", tamper="ALTER TABLE signals RENAME kev_exposed TO kev_x")
+
+    def test_extra_column_refused(self):
+        """An extra output column is refused before the write."""
+        self.run_checked([host("a")], [("id_a", "A", "a", 1)], "output columns differ from D9.4", tamper="ALTER TABLE signals ADD COLUMN extra INTEGER")
+
+    def test_wrong_column_type_refused(self):
+        """A carried column that arrives with another type (host_count BIGINT) is refused before the write."""
+        self.run_checked([host("a")], [("id_a", "A", "a", 1)], "output column types differ from D9.4", retype="host_count::BIGINT AS host_count")
+
+    def test_wrong_signal_type_refused(self):
+        """A signal column with another type (kev_host_count BIGINT) is refused before the write."""
+        self.run_checked([host("a")], [("id_a", "A", "a", 1)], "output column types differ from D9.4",
+                         tamper="ALTER TABLE signals ALTER kev_host_count TYPE BIGINT")
+
+    def test_reconcile_false_skips_only_the_reconciliation(self):
+        """With reconcile off (derived inputs in other tests) the row, key, column and type checks still run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts_path, companies_path = write_inputs(tmp, [host("a")], [("id_a", "A", "a", 1), ("id_a", "A", "a", 1)])
+            with self.assertRaises(SystemExit) as caught:
+                STAGE.run_stage(duckdb.connect(), hosts_path, companies_path, Path(tmp, "o.parquet"), reconcile=False)
+            self.assertIn("company_id is not unique", str(caught.exception))
+            self.assertFalse(Path(tmp, "o.parquet").exists())
 
 
 if __name__ == "__main__":
