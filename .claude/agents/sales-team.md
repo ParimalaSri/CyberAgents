@@ -30,3 +30,8 @@ suggest messaging that claims a breach occurred or pressures the reader.
 A short list: what works (2 to 3 points), top 3 problems ranked by how much they would stop me
 using it, and one concrete change for each. End with the line:
 "Simulated feedback; confirm with a real rep."
+
+## Memory (read-only reference)
+Read `.claude/agent-memory/sales-team/MEMORY.md` before you start: it records what is already known for this role
+(facts, incidents, open items). You are read-only, so you do NOT maintain it; if you learn something that
+belongs there, put it in your hand-off and the main session will add it.

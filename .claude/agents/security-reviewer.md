@@ -34,3 +34,8 @@ or open any file only to quote secrets.
 ## Hand-off
 First line: `CLEAN` or `ISSUES`. Then a numbered list: severity (high / medium / low), file:line, what, why it matters.
 End with what you did NOT check (for example, files outside the diff, history before the branch point).
+
+## Memory (read-only reference)
+Read `.claude/agent-memory/security-reviewer/MEMORY.md` before you start: it records what is already known for this role
+(facts, incidents, open items). You are read-only, so you do NOT maintain it; if you learn something that
+belongs there, put it in your hand-off and the main session will add it.
