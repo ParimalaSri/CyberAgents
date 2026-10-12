@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import duckdb
@@ -319,7 +320,138 @@ class CliRobustnessTests(unittest.TestCase):
             result = run_cli(["--input", src, "--output", out])
             self.assertEqual(result.returncode, 1)
             self.assertNotIn("Traceback", result.stderr)
-            self.assertFalse(out.exists())
+            self.assertFalse(out.exists())
+
+
+
+
+def write_hosts_custom(path, rows):
+    """Write full-width host tuples (the 11 columns of HOSTS_CLI_DDL, infra flags given by the caller) as a hosts parquet."""
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE h ({HOSTS_CLI_DDL})")
+    for row in rows:
+        con.execute("INSERT INTO h VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", list(row))
+    con.execute(f"COPY h TO '{Path(path).as_posix()}' (FORMAT PARQUET)")
+
+
+EXTRA_COMPANY = "SELECT '{i}', 'X', '{i}', 'org', 'high', 0, 0, 0, 0, 0, NULL, 0, 0, 0.0"
+
+
+class PreWriteConsistencyTests(unittest.TestCase):
+    """Every pre-write consistency check of stage 2 refuses an input that breaks only that check: message, exit code 1, nothing written."""
+
+    def run_checked(self, rows, tamper=None, expect=""):
+        """Run main in process on rows (optionally tampering with table companies right after it is built); assert a clean refusal and no files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out, report = Path(tmp, "hosts.parquet"), Path(tmp, "o", "companies.parquet"), Path(tmp, "r", "report.md")
+            write_hosts_custom(src, rows)
+            original = STAGE.build_companies
+
+            def build_then_tamper(con):
+                """Build companies, then apply the tampering SQL."""
+                original(con)
+                if tamper:
+                    con.execute(tamper)
+
+            with mock.patch.object(STAGE, "build_companies", build_then_tamper), mock.patch.object(STAGE, "write_output") as writer:
+                code, _, _ = GUARD_SUPPORT.run_main(STAGE, ["--input", src, "--output", out, "--report", report], GUARD_SUPPORT.load_guard())
+            self.assertIsInstance(code, str)
+            self.assertIn("inconsistent input, nothing written", code)
+            self.assertIn(expect, code)
+            writer.assert_not_called()
+            self.assertFalse(out.parent.exists())
+            self.assertFalse(report.parent.exists())
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["hosts.parquet"])
+
+    def test_null_identity_source(self):
+        """A NULL identity_source is an unexpected value."""
+        self.run_checked([("1.1.1.1", 443, "A", "a", "US", None, False, None, "a", False, None)], expect="unexpected identity_source")
+
+    def test_unknown_identity_source(self):
+        """A value outside the five identity sources is refused."""
+        self.run_checked([("1.1.1.1", 443, "A", "a", "US", None, False, "bogus", "a", False, None)], expect="unexpected identity_source")
+
+    def test_infra_reason_outside_contract_set(self):
+        """An infrastructure row with an infra_reason outside the contract set is refused."""
+        row = ("1.1.1.1", 443, "A", "a", "US", None, False, "infrastructure_unresolved", None, True, "made_up")
+        self.run_checked([row], expect="infra_reason values outside")
+
+    def test_infra_reason_null_on_infrastructure_row(self):
+        """An infrastructure row with a NULL infra_reason is refused."""
+        row = ("1.1.1.1", 443, "A", "a", "US", None, False, "infrastructure_unresolved", None, True, None)
+        self.run_checked([row], expect="infra_reason values outside")
+
+    def test_missing_report_columns_refused_by_the_cli(self):
+        """A hosts file without is_infrastructure or infra_reason is refused before the write (it used to fail in the report, after the write)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out, report = Path(tmp, "hosts.parquet"), Path(tmp, "o", "companies.parquet"), Path(tmp, "r", "report.md")
+            con = duckdb.connect()
+            con.execute("CREATE TABLE h(host_ip VARCHAR, port BIGINT, org VARCHAR, org_norm VARCHAR, country_code VARCHAR, cert_subject_o VARCHAR, "
+                        "is_noise BOOLEAN, identity_source VARCHAR, name_norm VARCHAR)")
+            con.execute("INSERT INTO h VALUES ('1.1.1.1', 443, 'A', 'a', 'US', NULL, false, 'org', 'a')")
+            con.execute(f"COPY h TO '{src.as_posix()}' (FORMAT PARQUET)")
+            result = run_cli(["--input", src, "--output", out, "--report", report])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("lacks is_infrastructure or infra_reason", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out.parent.exists())
+            self.assertFalse(report.parent.exists())
+
+    def test_companies_exceed_hosts(self):
+        """More companies than hosts rows (with unique keys and a matching host_count sum) is refused."""
+        rows = [("1.1.1.1", 443, "A", "a", "US", None, False, "org", "a", False, None)]
+        tamper = "INSERT INTO companies " + EXTRA_COMPANY.format(i="x1") + " UNION ALL " + EXTRA_COMPANY.format(i="x2")
+        self.run_checked(rows, tamper, "exceed hosts rows")
+
+    def test_company_id_not_unique(self):
+        """A duplicated company_id (distinct name_norm, counts unchanged, companies <= hosts) is refused."""
+        rows = [("1.1.1.%d" % i, 443, "A", "a", "US", None, False, "org", "a", False, None) for i in range(3)]
+        tamper = "INSERT INTO companies SELECT company_id, 'Y', 'y', identity_source, identity_confidence, 0, 0, 0, 0, 0, NULL, 0, 0, 0.0 FROM companies"
+        self.run_checked(rows, tamper, "not unique")
+
+    def test_name_norm_not_unique(self):
+        """A duplicated name_norm (distinct company_id, counts unchanged, companies <= hosts) is refused."""
+        rows = [("1.1.1.%d" % i, 443, "A", "a", "US", None, False, "org", "a", False, None) for i in range(3)]
+        tamper = "INSERT INTO companies SELECT 'zz', 'Y', name_norm, identity_source, identity_confidence, 0, 0, 0, 0, 0, NULL, 0, 0, 0.0 FROM companies"
+        self.run_checked(rows, tamper, "not unique")
+
+    def test_host_count_sum_differs_from_member_rows(self):
+        """sum(host_count) different from the member rows (companies <= hosts, keys unique) is refused."""
+        rows = [("1.1.1.%d" % i, 443, "A", "a", "US", None, False, "org", "a", False, None) for i in range(3)]
+        self.run_checked(rows, "UPDATE companies SET host_count = host_count + 1", "sum(host_count)")
+
+    def test_never_create_plus_member_rows_must_equal_hosts_rows(self):
+        """The reconciliation function reports an imbalance and stays quiet on a balanced input (unreachable through data once identity_source is checked)."""
+        self.assertIsNone(STAGE.reconcile_rows({"org": 2, "noise": 1, "null_org": 3}, 6))
+        self.assertIn("!=", STAGE.reconcile_rows({"org": 2, "noise": 1}, 4))
+        self.assertIn("!=", STAGE.reconcile_rows({"cert_o": 2, "org": 1}, 2))
+        self.assertIsNone(STAGE.reconcile_rows({}, 0))
+
+    def test_check_consistency_calls_reconcile_rows(self):
+        """check_consistency exits through reconcile_rows when it reports an imbalance (wiring check)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "hosts.parquet")
+            write_hosts_custom(src, [("1.1.1.1", 443, "A", "a", "US", None, False, "org", "a", False, None)])
+            con = duckdb.connect()
+            STAGE.build_members(con, src)
+            STAGE.build_companies(con)
+            STAGE.check_consistency(con)
+            with mock.patch.object(STAGE, "reconcile_rows", return_value="forced imbalance"):
+                with self.assertRaises(SystemExit) as caught:
+                    STAGE.check_consistency(con)
+            self.assertIn("forced imbalance", str(caught.exception))
+            self.assertIn("nothing written", str(caught.exception))
+
+    def test_refusal_exits_with_code_one_in_a_process(self):
+        """As a process, a refused input exits with code 1 and a readable message, no traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "hosts.parquet"), Path(tmp, "o", "companies.parquet")
+            write_hosts_custom(src, [("1.1.1.1", 443, "A", "a", "US", None, False, None, "a", False, None)])
+            result = run_cli(["--input", src, "--output", out])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("nothing written", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out.parent.exists())
 
 
 if __name__ == "__main__":

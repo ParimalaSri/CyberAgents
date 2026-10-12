@@ -116,24 +116,46 @@ def build_companies(con):
     )
 
 
-def check_consistency(con):
+def reconcile_rows(rows, total):
+    """Return an error text when identity_source row counts and hosts rows do not reconcile (never-create + member rows != total), else None."""
+    member_rows = sum(rows.get(s, 0) for s in MEMBER_SOURCES)
+    never = sum(n for s, n in rows.items() if s not in MEMBER_SOURCES)
+    if never + member_rows != total:
+        return f"hosts rows {total} != never-create rows {never} + member rows {member_rows}"
+    return None
+
+
+def fail_inconsistent(message):
+    """Exit with exit code 1 and a readable message that says nothing was written."""
+    sys.exit(f"companies stage: inconsistent input, nothing written: {message}")
+
+
+def check_consistency(con, need_report_columns=False):
     """Exit with a readable message when hosts or companies break a reconciliation rule; runs before any write."""
     total = con.execute("SELECT count(*) FROM hosts").fetchone()[0]
     rows = dict(con.execute("SELECT identity_source, count(*) FROM hosts GROUP BY 1").fetchall())
     unknown = set(rows) - set(IDENTITY_SOURCES)
     if unknown:
-        sys.exit(f"companies stage: inconsistent input, nothing written: unexpected identity_source values: {sorted(map(str, unknown))}")
-    has_reason = "infra_reason" in {r[0] for r in con.execute("DESCRIBE hosts").fetchall()}
-    reasons = {r for (r,) in con.execute("SELECT DISTINCT infra_reason FROM hosts WHERE is_infrastructure").fetchall()} if has_reason else set()
+        fail_inconsistent(f"unexpected identity_source values: {sorted(map(str, unknown))}")
+    columns = {r[0] for r in con.execute("DESCRIBE hosts").fetchall()}
+    if need_report_columns and not {"is_infrastructure", "infra_reason"} <= columns:
+        fail_inconsistent("hosts file lacks is_infrastructure or infra_reason (the report needs them)")
+    reasons = {r for (r,) in con.execute("SELECT DISTINCT infra_reason FROM hosts WHERE is_infrastructure").fetchall()} if "infra_reason" in columns else set()
     if reasons - set(INFRA_REASONS):
-        sys.exit(f"companies stage: inconsistent input, nothing written: infra_reason values outside the hosts contract set: {sorted(map(str, reasons - set(INFRA_REASONS)))}")
+        fail_inconsistent(f"infra_reason values outside the hosts contract set: {sorted(map(str, reasons - set(INFRA_REASONS)))}")
     n = con.execute("SELECT count(*) FROM companies").fetchone()[0]
     if n > total:
-        sys.exit(f"companies stage: inconsistent input, nothing written: companies {n} exceed hosts rows {total}")
-    member_rows = rows.get("org", 0) + rows.get("cert_o", 0)
+        fail_inconsistent(f"companies {n} exceed hosts rows {total}")
+    ids, names = con.execute("SELECT count(DISTINCT company_id), count(DISTINCT name_norm) FROM companies").fetchone()
+    if ids != n or names != n:
+        fail_inconsistent(f"company_id or name_norm is not unique: companies {n}, distinct company_id {ids}, distinct name_norm {names}")
+    problem = reconcile_rows(rows, total)
+    if problem:
+        fail_inconsistent(problem)
+    member_rows = sum(rows.get(s, 0) for s in MEMBER_SOURCES)
     members = con.execute("SELECT coalesce(sum(host_count), 0) FROM companies").fetchone()[0]
     if members != member_rows:
-        sys.exit(f"companies stage: inconsistent input, nothing written: sum(host_count) {members} != member rows {member_rows}")
+        fail_inconsistent(f"sum(host_count) {members} != member rows {member_rows}")
 
 
 def write_output(con, output_path):
@@ -142,11 +164,11 @@ def write_output(con, output_path):
     con.execute(f"COPY companies TO '{quote_path(output_path)}' (FORMAT PARQUET, COMPRESSION ZSTD)")
 
 
-def run_stage(con, hosts_path, output_path):
-    """Run read, group and write for one hosts file; return the hosts and companies row counts."""
+def run_stage(con, hosts_path, output_path, need_report_columns=False):
+    """Run read, group, check and write for one hosts file; return the hosts and companies row counts."""
     build_members(con, hosts_path)
     build_companies(con)
-    check_consistency(con)
+    check_consistency(con, need_report_columns)
     write_output(con, output_path)
     hosts_rows = con.execute("SELECT count(*) FROM hosts").fetchone()[0]
     company_rows = con.execute("SELECT count(*) FROM companies").fetchone()[0]
@@ -186,9 +208,6 @@ def pct(part, whole):
 def section_headline(con, rep, total):
     """Report section 1: the unresolved share and the shares per identity_source (D8.7 items 1 and 2)."""
     rows = dict(con.execute("SELECT identity_source, count(*) FROM hosts GROUP BY 1").fetchall())
-    unknown = set(rows) - set(IDENTITY_SOURCES)
-    assert not unknown, f"unexpected identity_source values: {unknown}"
-    assert sum(rows.values()) == total, "identity_source row counts do not sum to hosts rows"
     resolved = sum(rows.get(s, 0) for s in MEMBER_SOURCES)
     rep.add(f"## 1. Headline\n\n**{pct(total - resolved, total)} of scanned services cannot be attributed to a customer** "
             f"({total - resolved:,} of {total:,} hosts rows are not org or cert_o: infrastructure_unresolved, noise or null_org).")
@@ -202,7 +221,6 @@ def section_headline(con, rep, total):
     ).fetchall())
     ip_raw = dict(con.execute("SELECT identity_source, count(DISTINCT host_ip) FROM hosts GROUP BY 1").fetchall())
     total_ips = con.execute("SELECT count(DISTINCT host_ip) FROM hosts").fetchone()[0]
-    assert sum(ip_first.values()) == total_ips, "precedence IP counts do not sum to distinct host_ip"
     multi = con.execute("SELECT count(*) FROM (SELECT host_ip FROM hosts GROUP BY host_ip HAVING count(DISTINCT identity_source) > 1)").fetchone()[0]
     rep.table(("identity_source", "rows", "row share", "distinct IPs (D4 precedence)", "IP share", "distinct IPs (raw)"),
               [(s, f"{rows.get(s, 0):,}", pct(rows.get(s, 0), total), f"{ip_first.get(s, 0):,}", pct(ip_first.get(s, 0), total_ips),
@@ -217,9 +235,6 @@ def section_infrastructure(con, rep, total):
     infra = con.execute("SELECT count(*) FROM hosts WHERE is_infrastructure").fetchone()[0]
     rep.add(f"\n## 3. Infrastructure breakdown\n\nInfrastructure rows: {infra:,} of {total:,} = {pct(infra, total)} of all rows.\n")
     reasons = dict(con.execute("SELECT infra_reason, count(*) FROM hosts WHERE is_infrastructure GROUP BY 1").fetchall())
-    extra = set(reasons) - set(INFRA_REASONS)
-    assert not extra, f"infra_reason values outside the hosts contract set: {extra}"
-    assert sum(reasons.values()) == infra, "infra_reason counts do not sum to infrastructure rows"
     rep.table(("infra_reason", "rows", "share of infrastructure rows"),
               [(r, f"{reasons.get(r, 0):,}", pct(reasons.get(r, 0), infra)) for r in INFRA_REASONS])
     rep.add(f"\nip_pattern rows: {reasons.get('ip_pattern', 0):,} (expected 0). Seven values; set equals the hosts contract set (asserted).")
@@ -228,7 +243,6 @@ def section_infrastructure(con, rep, total):
 def section_companies(con, rep, total):
     """Report sections 4 to 6: company totals, host_count distribution and raw spellings (D8.7 items 4, 5, 6)."""
     n = con.execute("SELECT count(*) FROM companies").fetchone()[0]
-    assert n <= total, "companies exceed hosts rows"
     rep.add(f"\n## 4. Companies\n\nTotal companies: {n:,} (hosts rows {total:,}; companies <= hosts asserted).\n")
     by_source = con.execute("SELECT identity_source, identity_confidence, count(*) FROM companies GROUP BY 1, 2 ORDER BY 1, 2").fetchall()
     rep.table(("identity_source", "identity_confidence", "companies", "share"), [(s, c, f"{k:,}", pct(k, n)) for s, c, k in by_source])
@@ -286,12 +300,10 @@ def section_noise(con, rep):
 
 
 def section_reconciliation(con, rep, total, rows, members):
-    """Report section 9: hosts rows to companies, every difference explained; assert the arithmetic."""
+    """Report section 9: hosts rows to companies, every difference explained (the arithmetic was checked before the write)."""
     n = con.execute("SELECT count(*) FROM companies").fetchone()[0]
     member_rows = rows.get("org", 0) + rows.get("cert_o", 0)
     never = rows.get("infrastructure_unresolved", 0) + rows.get("noise", 0) + rows.get("null_org", 0)
-    assert never + member_rows == total, "hosts rows != never-create rows + member rows"
-    assert members == member_rows, f"sum(host_count) {members} != member rows {member_rows}"
     rep.add(f"\n## 9. Row-count reconciliation hosts to companies\n\n{total:,} hosts rows = {rows.get('infrastructure_unresolved', 0):,} infrastructure_unresolved + "
             f"{rows.get('noise', 0):,} noise + {rows.get('null_org', 0):,} null_org ({never:,} rows that never create a company) + {member_rows:,} member rows "
             f"({rows.get('org', 0):,} org + {rows.get('cert_o', 0):,} cert_o).")
@@ -316,7 +328,7 @@ def section_sample_and_nulls(con, rep, output_path):
 
 
 def print_report(con, output_path, report_path):
-    """Print and save the D8.7 stage report; assertions fail the run when the arithmetic breaks."""
+    """Print and save the D8.7 stage report (every reconciliation was already checked before the write)."""
     rep = Report()
     total = con.execute("SELECT count(*) FROM hosts").fetchone()[0]
     rep.add(f"# Companies stage report ({datetime.date.today().isoformat()})\n\nInput hosts rows: {total:,}. Output: {Path(output_path).as_posix()}.\n")
@@ -349,7 +361,7 @@ def main(argv=None):
     guard.check_output_path(output_path)
     guard.check_output_path(report_path)
     con = duckdb.connect()
-    run_stage(con, hosts_path, output_path)
+    run_stage(con, hosts_path, output_path, need_report_columns=True)
     print_report(con, output_path, report_path)
 
 
