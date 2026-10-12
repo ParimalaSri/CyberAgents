@@ -441,3 +441,19 @@ Entries below were raised by data-integrator from profiling `data/raw/sample_100
 ## PIPE-017 The stage 4 test run printed a report table to stdout (QA finding 10)
 - Symptom: `scripts.test_4_score` printed markdown tables during a normal run.
 - Fix: the tests use a `QuietReport` that collects lines without printing.
+
+## PIPE-018 Path guard missed extended and loopback-UNC forms of the dataset folder; tests depended on the real folders (QA N1, N2, N5)
+- Symptom: `\?\D:\Cyber_DataSet\x` and `\localhost\D$\Cyber_DataSet\x` were allowed; a mutant run left a stray file in the real dataset folder and then failed the suites.
+- Root cause: no prefix normalisation (`\?\`, `\?\UNC\`, loopback host and `X$` share, trailing dots and spaces); tests wrote real targets under the real folders.
+- Fix: `scripts/path_guard.py` normalises those forms before comparing; protected folders are injectable parameters (no environment variable or flag); every guard test uses scratch folders.
+- Test: `test_path_guard.ForbiddenPathTests`, `RealFoldersNotTouchedTests`, `guard_test_support.assert_stage_refuses` in the four stage suites.
+
+## PIPE-019 Stages asserted consistency after writing (QA N3)
+- Symptom: stage 3 on empty companies with non-empty hosts left the parquet on disk and printed a raw AssertionError.
+- Fix: stages 2, 3 and 4 check consistency before writing, exit 1 with "inconsistent input, nothing written", and leave no output or report.
+- Test: `test_inconsistent_input_exits_*` in `test_2_companies`, `test_3_signals` (case E23, also as a subprocess), `test_4_score.test_check_consistency_exits_before_writing`.
+
+## PIPE-020 Surviving mutants and quiet stage 2 tests (QA N4, finding 10)
+- Symptom: tie-break hash tested with one differing field, no symlink, non-repo `data/raw`, `--report` under raw, or `percent()` value tests; `test_2_companies` printed a report.
+- Fix: tests only, plus stdout redirect in the stage 2 report test.
+- Test: `test_1_clean.test_dedupe_tie_total_per_hashed_column`, `test_percent_values_and_report_line`, `test_path_guard.test_links_into_protected_folders_refused`, `test_data_raw_outside_the_repo_refused`, the output-with-safe-report and report-target cases in `assert_stage_refuses`.
