@@ -398,8 +398,9 @@ class PreWriteConsistencyTests(unittest.TestCase):
             self.assertFalse(report.parent.exists())
 
     def test_companies_exceed_hosts(self):
-        """More companies than hosts rows (with unique keys and a matching host_count sum) is refused."""
+        """One company more than hosts rows (unique keys, matching host_count sum) is refused; two more as well."""
         rows = [("1.1.1.1", 443, "A", "a", "US", None, False, "org", "a", False, None)]
+        self.run_checked(rows, "INSERT INTO companies " + EXTRA_COMPANY.format(i="x1"), "companies 2 exceed hosts rows 1")
         tamper = "INSERT INTO companies " + EXTRA_COMPANY.format(i="x1") + " UNION ALL " + EXTRA_COMPANY.format(i="x2")
         self.run_checked(rows, tamper, "exceed hosts rows")
 
