@@ -1,6 +1,8 @@
 """Unit tests for pipeline/2_companies.py on a tiny synthetic hosts parquet (stdlib unittest, no pandas)."""
+import contextlib
 import hashlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -196,7 +198,8 @@ class CompaniesStageTests(unittest.TestCase):
             con.execute("ALTER TABLE hosts ADD COLUMN infra_reason VARCHAR")
             con.execute("UPDATE hosts SET is_infrastructure = true, infra_reason = 'org_exact' WHERE identity_source = 'infrastructure_unresolved'")
             report = Path(tmp) / "report.md"
-            STAGE.print_report(con, out, report)
+            with contextlib.redirect_stdout(io.StringIO()):
+                STAGE.print_report(con, out, report)
             text = report.read_text(encoding="utf-8")
         self.assertIn("cannot be attributed to a customer", text)
         self.assertIn("Row-count reconciliation", text)
@@ -299,6 +302,24 @@ class CliRobustnessTests(unittest.TestCase):
             src = Path(tmp, "hosts.parquet")
             write_hosts(src, [host("1.1.1.1", org="Acme", norm="acme")])
             GUARD_SUPPORT.assert_stage_refuses(self, STAGE, ["--input", src], with_report=True, safe_dir=tmp)
+
+
+    def test_inconsistent_input_exits_cleanly_before_writing(self):
+        """A hosts file with an unknown identity_source exits with a readable message and leaves no output or report behind."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "hosts.parquet")
+            write_hosts(src, [host("1.1.1.1", org="Acme", norm="acme", source="bogus")])
+            out, report = Path(tmp, "o", "companies.parquet"), Path(tmp, "r", "report.md")
+            code, _, _ = GUARD_SUPPORT.run_main(STAGE, ["--input", src, "--output", out, "--report", report], GUARD_SUPPORT.load_guard())
+            self.assertIsInstance(code, str)
+            self.assertIn("inconsistent input, nothing written", code)
+            self.assertIn("unexpected identity_source", code)
+            self.assertFalse(out.parent.exists())
+            self.assertFalse(report.exists())
+            result = run_cli(["--input", src, "--output", out])
+            self.assertEqual(result.returncode, 1)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out.exists())
 
 
 if __name__ == "__main__":

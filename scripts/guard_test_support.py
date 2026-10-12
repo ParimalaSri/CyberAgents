@@ -77,6 +77,11 @@ def assert_stage_refuses(case, stage, input_args, with_report=True, safe_dir=Non
             case.assertIn("refusing to write", code, str(target))
             case.assertEqual(scratch_files(scratch), [], str(target))
             if with_report:
+                code, _, _ = run_main(stage, [*input_args, "--output", target, "--report", safe.with_suffix(".md")], scratch.guard)
+                case.assertIsInstance(code, str, "output with safe report " + str(target))
+                case.assertIn("refusing to write", code, "output with safe report " + str(target))
+                case.assertEqual(scratch_files(scratch), [], "output with safe report " + str(target))
+                case.assertFalse(safe.with_suffix(".md").exists(), "output with safe report " + str(target))
                 code, _, _ = run_main(stage, [*input_args, "--output", safe, "--report", target], scratch.guard)
                 case.assertIsInstance(code, str, "report " + str(target))
                 case.assertIn("refusing to write", code, "report " + str(target))

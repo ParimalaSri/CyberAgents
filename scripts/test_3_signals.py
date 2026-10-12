@@ -421,5 +421,31 @@ class CliRobustnessTests(unittest.TestCase):
             GUARD_SUPPORT.assert_stage_refuses(self, STAGE, ["--hosts", src, "--companies", comp], with_report=True, safe_dir=tmp)
 
 
+    def test_inconsistent_input_exits_cleanly_before_writing(self):
+        """Hosts with an empty companies file (QA case E23) exit with a readable message and leave no output or report behind."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts, companies = write_inputs(tmp, [host("acme")], [])
+            out, report = Path(tmp, "o", "signals.parquet"), Path(tmp, "r", "report.md")
+            code, _, err = GUARD_SUPPORT.run_main(STAGE, ["--hosts", hosts, "--companies", companies, "--output", out, "--report", report], GUARD_SUPPORT.load_guard())
+            self.assertIsInstance(code, str)
+            self.assertIn("inconsistent input, nothing written", code)
+            self.assertIn("sum(counted_host_count) 0 != counted member host rows 1", code)
+            self.assertFalse(out.exists())
+            self.assertFalse(out.parent.exists())
+            self.assertFalse(report.exists())
+            self.assertEqual(err, "")
+
+    def test_inconsistent_input_exits_with_code_one_as_a_process(self):
+        """As a subprocess the same input ends with exit code 1, the message on stderr and no traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hosts, companies = write_inputs(tmp, [host("acme")], [])
+            out = Path(tmp, "o", "signals.parquet")
+            result = run_cli(["--hosts", hosts, "--companies", companies, "--output", out])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("inconsistent input, nothing written", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

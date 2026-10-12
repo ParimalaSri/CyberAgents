@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import duckdb
 
@@ -850,6 +851,29 @@ class CliRobustnessTests(unittest.TestCase):
             src = Path(tmp, "signals.parquet")
             write_signals(src, [sig("a")])
             GUARD_SUPPORT.assert_stage_refuses(self, STAGE, ["--input", src], with_report=True, safe_dir=tmp)
+
+
+    def test_check_consistency_exits_before_writing(self):
+        """Fan-out, an empty why and a band contact each stop the stage with a readable message before write_output runs."""
+        cases = {"fan-out": "INSERT INTO signals SELECT * FROM signals", "empty why": "UPDATE accounts SET why = ' '", "band contact": "UPDATE accounts SET band = 'contact', final_band = 'contact'"}
+        for label, damage in cases.items():
+            with tempfile.TemporaryDirectory() as tmp:
+                src, out = Path(tmp, "signals.parquet"), Path(tmp, "o", "accounts.parquet")
+                write_signals(src, [sig("a")])
+                con = duckdb.connect()
+                real_build = STAGE.build_accounts
+
+                def damaged(connection, real_build=real_build, damage=damage):
+                    """Build accounts as usual, then damage the table the way the label says."""
+                    real_build(connection)
+                    connection.execute(damage)
+
+                with mock.patch.object(STAGE, "build_accounts", damaged), mock.patch.object(STAGE, "write_output") as writer:
+                    with self.assertRaises(SystemExit) as caught:
+                        STAGE.run_stage(con, src, out)
+                self.assertIn("inconsistent input, nothing written", str(caught.exception), label)
+                writer.assert_not_called()
+                self.assertFalse(out.parent.exists(), label)
 
 
 if __name__ == "__main__":

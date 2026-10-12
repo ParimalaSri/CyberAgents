@@ -1,5 +1,7 @@
 """Unit tests for pipeline/1_clean.py on a tiny synthetic JSONL (stdlib unittest, no pandas)."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -298,6 +300,49 @@ class QaFixTests(unittest.TestCase):
         first, _, _ = run_rows([a, b])
         second, _, _ = run_rows([b, a])
         self.assertEqual((first[0]["country_code"], first[0]["cert_subject_cn"]), (second[0]["country_code"], second[0]["cert_subject_cn"]))
+
+    def test_dedupe_tie_total_per_hashed_column(self):
+        """For each of max_cvss, hostnames, cert_expires, os and vuln_count, three rows differing only in that column give 1 output over all 6 input orders."""
+        def cert(expires):
+            """Return an ssl block whose certificate differs only in its expiry."""
+            return {"cert": {"expires": expires, "issued": "20200101000000Z", "expired": False, "subject": {"O": None, "CN": "x"}}, "versions": None}
+
+        variants = {
+            "max_cvss": [dict(vulns={"CVE-1": {"cvss": value, "kev": False}}) for value in (2.0, 5.5, 9.8)],
+            "hostnames": [dict(hostnames=[name]) for name in ("a.example", "b.example", "c.example")],
+            "cert_expires": [dict(ssl=cert(stamp)) for stamp in ("20300101000000Z", "20310101000000Z", "20320101000000Z")],
+            "os": [dict(os=name) for name in ("Linux", "Windows", "FreeBSD")],
+            "vuln_count": [dict(vulns={f"CVE-{i}": {"cvss": 5.0, "kev": False} for i in range(n)}) for n in (1, 2, 3)],
+        }
+        for column, overrides in variants.items():
+            rows_in = [make_row(**over) for over in overrides]
+            outputs = set()
+            for order in itertools.permutations(rows_in):
+                rows, _, _ = run_rows(list(order))
+                self.assertEqual(len(rows), 1, column)
+                outputs.add(str(rows[0][column]))
+            self.assertEqual(len(outputs), 1, (column, outputs))
+
+    def test_percent_values_and_report_line(self):
+        """percent() gives exact shares (1 of 3, 2 of 3, halves) and 0.0 for a zero whole; the is_noise report line uses it."""
+        self.assertAlmostEqual(STAGE.percent(1, 3), 33.3333333, places=5)
+        self.assertAlmostEqual(STAGE.percent(2, 3), 66.6666667, places=5)
+        self.assertEqual(STAGE.percent(0, 0), 0.0)
+        self.assertEqual(STAGE.percent(5, 0), 0.0)
+        self.assertEqual(STAGE.percent(1, 8), 12.5)
+        self.assertEqual(f"{STAGE.percent(1, 32):.2f}", "3.12")
+        self.assertEqual(f"{STAGE.percent(1, 3):.2f}", "33.33")
+        self.assertEqual(f"{STAGE.percent(1, 1):.2f}", "100.00")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "in.jsonl")
+            src.write_text("\n".join(json.dumps(r) for r in [make_row(port=1, tags=["honeypot"]), make_row(port=2), make_row(port=3)]) + "\n", encoding="utf-8")
+            con = duckdb.connect()
+            counts = STAGE.run_stage(con, src, Path(tmp, "o.parquet"))
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                STAGE.print_flag_report(con, counts)
+        self.assertIn("is_noise rows: 1 (33.33%)", captured.getvalue())
+        self.assertIn("surviving (not infrastructure): 3 = 100.00%", captured.getvalue())
 
     def test_certificate_year_edges(self):
         """Years 1990 and 2100 are kept; 1989 and 2101 are nulled and flagged invalid."""
