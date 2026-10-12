@@ -873,7 +873,147 @@ class CliRobustnessTests(unittest.TestCase):
                         STAGE.run_stage(con, src, out)
                 self.assertIn("inconsistent input, nothing written", str(caught.exception), label)
                 writer.assert_not_called()
-                self.assertFalse(out.parent.exists(), label)
+                self.assertFalse(out.parent.exists(), label)
+
+
+class PreWriteConsistencyTests(unittest.TestCase):
+    """Every pre-write consistency check of stage 4 refuses an input that breaks only that check: message, exit code 1, nothing written."""
+
+    ROWS = None
+
+    @classmethod
+    def rows(cls):
+        """Return the fixture: a plain skip account a, a would-be contact b (strong signals), an excluded account c and two more skip accounts a1, a2."""
+        strong = dict(kev_exposed=True, max_cvss_band=3, exposed_and_outdated=True, risky_service_exposed=True, risky_non_ssh_exposed=True, footprint_band=3,
+                      sensitive_stack=True)
+        return [sig("a"), sig("a1"), sig("a2"), sig("b", **strong), sig("c", noise_host_count=3, noise_host_share=0.9)]
+
+    def run_checked(self, tamper, expect, review_n=None):
+        """Run main in process with SQL damage applied to the accounts table right after it is built; assert message, no write call and no files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out, report = Path(tmp, "signals.parquet"), Path(tmp, "o", "accounts.parquet"), Path(tmp, "r", "report.md")
+            write_signals(src, self.rows())
+            original = STAGE.build_accounts
+
+            def damaged(con):
+                """Build accounts as usual, then run the damage SQL."""
+                original(con)
+                con.execute(tamper)
+
+            argv = ["--input", src, "--output", out, "--report", report] + (["--review-n", review_n] if review_n is not None else [])
+            with mock.patch.object(STAGE, "build_accounts", damaged), mock.patch.object(STAGE, "write_output") as writer:
+                code, _, _ = GUARD_SUPPORT.run_main(STAGE, argv, GUARD_SUPPORT.load_guard())
+            self.assertIsInstance(code, str, tamper)
+            self.assertIn("inconsistent input, nothing written", code, tamper)
+            self.assertIn(expect, code, tamper)
+            writer.assert_not_called()
+            self.assertFalse(out.parent.exists(), tamper)
+            self.assertFalse(report.parent.exists(), tamper)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()), ["signals.parquet"], tamper)
+
+    def test_baseline_fixture_is_clean(self):
+        """The undamaged fixture passes every check and is written (so each refusal below is caused by its damage alone)."""
+        accounts, _, _, _ = run_scores(self.rows())
+        self.assertEqual(accounts["b"]["band"], "review")
+        self.assertEqual(accounts["b"]["cap_reasons"], "operator_unverified")
+        self.assertEqual(accounts["c"]["band"], "exclude")
+        self.assertEqual(accounts["a"]["band"], "skip")
+        self.assertEqual(accounts["b"]["fit_score"], 65)
+
+    def test_rows_dropped(self):
+        """Fewer accounts than signals rows is refused."""
+        self.run_checked("DELETE FROM accounts WHERE account_id = 'a'", "fan-out or drop: signals 5, accounts 4")
+
+    def test_rows_fanned_out(self):
+        """More accounts than signals rows is refused."""
+        self.run_checked("INSERT INTO accounts SELECT * REPLACE ('zz' AS account_id) FROM accounts WHERE account_id = 'a'", "fan-out or drop: signals 5, accounts 6")
+
+    def test_account_id_not_unique(self):
+        """A duplicated account_id with equal row counts is refused."""
+        self.run_checked("INSERT INTO accounts SELECT * FROM accounts WHERE account_id = 'a'; DELETE FROM accounts WHERE account_id = 'c'", "account_id is not unique")
+
+    def test_column_name_and_type_changes(self):
+        """A renamed column, an extra column and a retyped column are each refused."""
+        self.run_checked("ALTER TABLE accounts RENAME why TO why2", "output columns or types differ")
+        self.run_checked("ALTER TABLE accounts ADD COLUMN extra INTEGER", "output columns or types differ")
+        self.run_checked("ALTER TABLE accounts ALTER fit_score TYPE BIGINT", "output columns or types differ")
+
+    def test_score_out_of_range_or_null(self):
+        """Each of the three scores above 100, below 0 or NULL is refused with its own name."""
+        for column, row in (("fit_score", "a"), ("urgency_score", "b"), ("contact_score", "b")):
+            for value in ("101", "-1", "NULL"):
+                self.run_checked(f"UPDATE accounts SET {column} = {value} WHERE account_id = '{row}'", f"{column} outside 0 to 100 or NULL")
+
+    def test_empty_blank_and_null_why(self):
+        """An empty, a blank and a NULL why are each refused."""
+        for value in ("''", "' '", "NULL"):
+            self.run_checked(f"UPDATE accounts SET why = {value} WHERE account_id = 'a'", "NULL or blank why")
+
+    def test_band_null_unknown_and_contact(self):
+        """A NULL or unknown band and a band contact are each refused with their own message."""
+        self.run_checked("UPDATE accounts SET band = NULL, final_band = NULL WHERE account_id = 'a'", "NULL or unknown band")
+        self.run_checked("UPDATE accounts SET band = 'bogus', final_band = 'bogus' WHERE account_id = 'a'", "NULL or unknown band")
+        self.run_checked("UPDATE accounts SET band = 'contact', final_band = 'contact' WHERE account_id = 'a'", "in band contact")
+
+    def test_band_uncapped_null_or_unknown(self):
+        """A NULL or unknown band_uncapped is refused."""
+        self.run_checked("UPDATE accounts SET band_uncapped = NULL WHERE account_id = 'a'", "NULL or unknown band_uncapped")
+        self.run_checked("UPDATE accounts SET band_uncapped = 'bogus' WHERE account_id = 'a'", "NULL or unknown band_uncapped")
+
+    def test_final_band_differs_from_band(self):
+        """final_band different from band (also NULL against a value) is refused."""
+        self.run_checked("UPDATE accounts SET final_band = 'review' WHERE account_id = 'a'", "different from band")
+        self.run_checked("UPDATE accounts SET final_band = NULL WHERE account_id = 'a'", "different from band")
+
+    def test_decision_or_prompt_version_present(self):
+        """A decision or a prompt_version before adjudication is refused, each with its own message."""
+        self.run_checked("UPDATE accounts SET decision = 'contact' WHERE account_id = 'a'", "with a decision before adjudication")
+        self.run_checked("UPDATE accounts SET prompt_version = 'v1' WHERE account_id = 'a'", "with a prompt_version before adjudication")
+
+    def test_exclude_rule_both_directions(self):
+        """An account in the exclude band without noise, and a noisy account outside the exclude band, are each refused."""
+        self.run_checked("UPDATE accounts SET band = 'exclude', final_band = 'exclude' WHERE account_id = 'a1'", "without meeting the noise rule")
+        self.run_checked("UPDATE accounts SET band = 'skip', final_band = 'skip' WHERE account_id = 'c'", "meeting the noise rule but not in the exclude band")
+
+    def test_would_be_contact_must_be_held_with_operator_unverified(self):
+        """A would-be contact without operator_unverified, or outside review, is refused."""
+        self.run_checked("UPDATE accounts SET cap_reasons = NULL WHERE account_id = 'b'", "would-be contacts not held in review with operator_unverified")
+        self.run_checked("UPDATE accounts SET cap_reasons = 'singleton' WHERE account_id = 'b'", "would-be contacts not held in review with operator_unverified")
+        self.run_checked("UPDATE accounts SET band = 'skip', final_band = 'skip' WHERE account_id = 'b'", "would-be contacts not held in review with operator_unverified")
+
+    def test_contact_score_above_urgency_or_below_floor(self):
+        """contact_score above urgency_score and below FLOOR times urgency_score are each refused."""
+        self.run_checked("UPDATE accounts SET contact_score = urgency_score + 1 WHERE account_id = 'b'", "contact_score above urgency_score")
+        self.run_checked("UPDATE accounts SET contact_score = 1 WHERE account_id = 'b'", "below FLOOR")
+
+    def test_review_band_larger_than_n_plus_would_be(self):
+        """More review accounts than max(N, would-be contacts) is refused; at exactly that number the stage passes."""
+        damage = "UPDATE accounts SET band = 'review', final_band = 'review' WHERE account_id IN ('a1', 'a2', 'a')"
+        self.run_checked(damage, "review band has 4 accounts, above N = 1 (would-be contacts 1)", review_n=1)
+
+    def test_review_band_at_the_limit_passes(self):
+        """The same damage with N = 4 is within the limit, so no review-size refusal fires (kills a > turned into >=)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "signals.parquet")
+            write_signals(src, self.rows())
+            con = duckdb.connect()
+            STAGE.build_scored(con, src, STAGE.THRESHOLD_CONTACT, STAGE.THRESHOLD_REVIEW, 4)
+            STAGE.build_accounts(con)
+            con.execute("UPDATE accounts SET band = 'review', final_band = 'review' WHERE account_id IN ('a1', 'a2', 'a')")
+            STAGE.check_consistency(con, 4)
+            with self.assertRaises(SystemExit):
+                STAGE.check_consistency(con, 3)
+
+    def test_refusal_exits_with_code_one_in_a_process(self):
+        """As a process, a refused input exits with code 1 and a readable message, no traceback (a signals file with a duplicated company_id)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp, "signals.parquet"), Path(tmp, "o", "accounts.parquet")
+            write_signals(src, [sig("a"), sig("a")])
+            result = run_cli(["--input", src, "--output", out])
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("nothing written", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            self.assertFalse(out.parent.exists())
 
 
 if __name__ == "__main__":

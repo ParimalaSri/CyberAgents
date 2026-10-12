@@ -296,25 +296,55 @@ def build_accounts(con):
     )
 
 
-def check_consistency(con):
-    """Exit with a readable message when accounts fan out, drop signals rows, lack a why or break a score or band invariant; runs before any write."""
+def fail_inconsistent(message):
+    """Exit with exit code 1 and a readable message that says nothing was written."""
+    sys.exit(f"accounts stage: inconsistent input, nothing written: {message}")
+
+
+def score_conditions():
+    """Return (label, SQL condition over accounts a joined to scored s) pairs; a row matching a condition breaks that rule."""
+    in_bands = ", ".join(f"'{b}'" for b in BANDS)
+    noise = f"(s.noise_host_count >= {NOISE_MIN_HOSTS} AND s.noise_host_share >= {NOISE_MIN_SHARE})"
+    rules = [(f"{name} outside 0 to 100 or NULL", f"NOT coalesce(a.{name} BETWEEN 0 AND 100, false)") for name in ("fit_score", "urgency_score", "contact_score")]
+    rules += [
+        ("with a NULL or blank why", "a.why IS NULL OR trim(a.why) = ''"),
+        ("with a NULL or unknown band", f"a.band IS NULL OR a.band NOT IN ({in_bands})"),
+        ("in band contact (only adjudication may set it)", "a.band = 'contact'"),
+        ("with a NULL or unknown band_uncapped", f"a.band_uncapped IS NULL OR a.band_uncapped NOT IN ({in_bands})"),
+        ("with final_band different from band", "a.final_band IS DISTINCT FROM a.band"),
+        ("with a decision before adjudication", "a.decision IS NOT NULL"),
+        ("with a prompt_version before adjudication", "a.prompt_version IS NOT NULL"),
+        ("in the exclude band without meeting the noise rule", f"a.band = 'exclude' AND NOT {noise}"),
+        ("meeting the noise rule but not in the exclude band", f"a.band <> 'exclude' AND {noise}"),
+        ("would-be contacts not held in review with operator_unverified",
+         f"a.band_uncapped = 'contact' AND (a.band <> 'review' OR NOT list_contains(string_split(coalesce(a.cap_reasons, ''), ','), '{CAP_UNVERIFIED}'))"),
+    ]
+    if CONTACT_FORM == "b":
+        rules += [("with contact_score above urgency_score", "a.contact_score > a.urgency_score"),
+                  (f"with contact_score below FLOOR {FLOOR_PCT}% of urgency_score (rounding tolerance 0.5)", f"a.contact_score * 100 < {FLOOR_PCT} * a.urgency_score - 50")]
+    return rules
+
+
+def check_consistency(con, review_n=REVIEW_N):
+    """Exit with a readable message when accounts fan out, drop rows, have wrong columns or types, or break a score, band, why, review or exclude rule; runs before any write."""
     n_sig = con.execute("SELECT count(*) FROM signals").fetchone()[0]
     n_acc = con.execute("SELECT count(*) FROM accounts").fetchone()[0]
     uniq = con.execute("SELECT count(DISTINCT account_id) FROM accounts").fetchone()[0]
-    if not n_sig == n_acc == uniq:
-        sys.exit(f"accounts stage: inconsistent input, nothing written: fan-out or drop: signals {n_sig}, accounts {n_acc}, distinct account_id {uniq}")
-    empty = con.execute("SELECT count(*) FROM accounts WHERE why IS NULL OR trim(why) = ''").fetchone()[0]
-    if empty:
-        sys.exit(f"accounts stage: inconsistent input, nothing written: {empty} accounts with an empty why")
-    bad = con.execute(
-        "SELECT count(*) FROM accounts WHERE fit_score NOT BETWEEN 0 AND 100 OR urgency_score NOT BETWEEN 0 AND 100 OR contact_score NOT BETWEEN 0 AND 100 "
-        "OR final_band <> band OR band = 'contact' OR band IS NULL OR band_uncapped IS NULL OR trim(why) = '' OR decision IS NOT NULL OR prompt_version IS NOT NULL").fetchone()[0]
-    if bad:
-        sys.exit(f"accounts stage: inconsistent input, nothing written: {bad} accounts break a basic invariant")
-    if CONTACT_FORM == "b":
-        viol = con.execute(f"SELECT count(*) FROM accounts WHERE contact_score > urgency_score OR contact_score * 100 < {FLOOR_PCT} * urgency_score - 50").fetchone()[0]
-        if viol:
-            sys.exit(f"accounts stage: inconsistent input, nothing written: {viol} accounts break FLOOR * urgency <= contact <= urgency")
+    if n_sig != n_acc:
+        fail_inconsistent(f"fan-out or drop: signals {n_sig}, accounts {n_acc}")
+    if uniq != n_acc:
+        fail_inconsistent(f"account_id is not unique: accounts {n_acc}, distinct account_id {uniq}")
+    described = tuple((r[0], r[1]) for r in con.execute("DESCRIBE accounts").fetchall())
+    if described != OUTPUT_COLUMNS:
+        fail_inconsistent(f"output columns or types differ from D9.6 item 9: {list(described)}")
+    for label, condition in score_conditions():
+        count = con.execute(f"SELECT count(*) FROM accounts a JOIN scored s ON s.company_id = a.account_id WHERE {condition}").fetchone()[0]
+        if count:
+            fail_inconsistent(f"{count} accounts {label}")
+    would_be = con.execute("SELECT count(*) FROM scored WHERE band_uncapped = 'contact'").fetchone()[0]
+    review = con.execute("SELECT count(*) FROM accounts WHERE band = 'review'").fetchone()[0]
+    if review > max(review_n, would_be):
+        fail_inconsistent(f"review band has {review} accounts, above N = {review_n} (would-be contacts {would_be})")
 
 
 def write_output(con, output_path):
@@ -324,14 +354,14 @@ def write_output(con, output_path):
 
 
 def run_stage(con, input_path, output_path, contact=THRESHOLD_CONTACT, review=THRESHOLD_REVIEW, review_n=REVIEW_N):
-    """Score, band, explain and write one signals file; return the row counts."""
+    """Score, band, explain, check and write one signals file; return the row counts."""
     if review >= contact:
         raise ValueError(f"review threshold ({review}) must be below the contact threshold ({contact})")
     if review_n < 0:
         raise ValueError(f"review_n ({review_n}) must not be negative")
     build_scored(con, input_path, contact, review, review_n)
     build_accounts(con)
-    check_consistency(con)
+    check_consistency(con, review_n)
     write_output(con, output_path)
     return {"signals_rows": con.execute("SELECT count(*) FROM signals").fetchone()[0],
             "accounts_rows": con.execute("SELECT count(*) FROM accounts").fetchone()[0]}
@@ -515,19 +545,10 @@ def section_output(con, rep, output_path, signals_rows):
     report = load_module("stage_report", REPORT_SCRIPT)
     out = Path(output_path).as_posix()
     total = report.count_rows(con, out)
-    assert total == signals_rows, "accounts rows != signals rows"
     described = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{quote_path(out)}')").fetchall()
     cols = [(r[0], r[1]) for r in described]
-    assert tuple(cols) == OUTPUT_COLUMNS, f"output columns differ from D9.6 item 9: {cols}"
     rep.add(f"\n## 5. Output file\n\nPath: {out}; rows: {total:,}; columns: {len(cols)}. Previous layer (signals rows): {signals_rows:,}; difference 0 "
             f"(asserted: one row per company, account_id unique, no fan-out, no drop).\n\nColumns: " + ", ".join(f"{n} {t}" for n, t in cols) + ".\n")
-    bad = con.execute(
-        f"SELECT count(*) FROM accounts WHERE fit_score NOT BETWEEN 0 AND 100 OR urgency_score NOT BETWEEN 0 AND 100 OR contact_score NOT BETWEEN 0 AND 100 "
-        f"OR final_band <> band OR band = 'contact' OR band IS NULL OR band_uncapped IS NULL OR trim(why) = '' OR decision IS NOT NULL OR prompt_version IS NOT NULL").fetchone()[0]
-    assert bad == 0, f"{bad} accounts break a basic invariant"
-    if CONTACT_FORM == "b":
-        viol = con.execute(f"SELECT count(*) FROM accounts WHERE contact_score > urgency_score OR contact_score * 100 < {FLOOR_PCT} * urgency_score - 50").fetchone()[0]
-        assert viol == 0, f"{viol} accounts break FLOOR * urgency <= contact <= urgency"
     rep.add("Asserted in the run: scores within 0 to 100; every account has a band, band_uncapped and a non-empty why; final_band = band; decision and "
             "prompt_version all null and no account in band contact (D10: only LLM adjudication may set final_band = contact); FLOOR * urgency <= contact_score <= urgency (rounding tolerance 0.5).\n")
     rep.add("Null rates (all columns, worst first):\n")
@@ -540,7 +561,7 @@ def section_output(con, rep, output_path, signals_rows):
 
 
 def print_report(con, run, output_path, report_path, contact, review, review_n=REVIEW_N):
-    """Print and save the stage report; assertions fail the run when the arithmetic breaks."""
+    """Print and save the stage report (every invariant was already checked before the write)."""
     rep = Report()
     total = run["accounts_rows"]
     rep.add(f"# Accounts stage report ({datetime.date.today().isoformat()})\n")
