@@ -52,6 +52,11 @@ def forbidden_targets(scratch, name="guard_probe.parquet"):
         "\\\\?\\" + str(scratch.dataset / name),
         "\\\\?\\" + str(scratch.raw / name),
         unc,
+        str(scratch.dataset) + ":evil",
+        str(scratch.raw) + ":evil",
+        "\\??\\" + str(scratch.dataset / name),
+        "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume5" + str(scratch.dataset)[len(drive):].replace("/", "\\") + "\\" + name,
+        "\\\\192.168.1.7\\" + drive[0] + "$" + str(scratch.dataset)[len(drive):].replace("/", "\\") + "\\" + name,
     ]
 
 

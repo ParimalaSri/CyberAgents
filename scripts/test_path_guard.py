@@ -2,6 +2,7 @@
 import importlib.util
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -77,8 +78,7 @@ class ForbiddenPathTests(unittest.TestCase):
         with SUPPORT.scratch_protected() as scratch:
             allowed = [scratch.root / "ds_scratch2" / "x", scratch.root / "raw_scratch2" / "x", scratch.root / "silver" / "x.parquet",
                        str(scratch.raw / ".." / "silver" / "x"), str(scratch.dataset / ".." / "out" / "x"), scratch.root / "data" / "raw2" / "x",
-                       scratch.root / "data" / "silver" / "x", "\\\\?\\" + str(scratch.root / "ds_scratch2" / "x"),
-                       "\\\\localhost\\" + scratch.root.drive[0] + "$" + str(scratch.root)[2:] + "\\ds_scratch2\\x"]
+                       scratch.root / "data" / "silver" / "x", scratch.root / "data" / "gold" / "x", scratch.root / "ｄａｔａ" / "ｒａｗ" / "x"]
             for path in allowed:
                 self.assertIsNone(scratch.guard.forbidden_reason(path), str(path))
                 scratch.guard.check_output_path(path)
@@ -86,10 +86,11 @@ class ForbiddenPathTests(unittest.TestCase):
     def test_data_raw_outside_the_repo_refused(self):
         """Any path with consecutive parts `data` then `raw` is refused even when it is not the repo's raw folder (kills a dropped parts clause)."""
         with SUPPORT.scratch_protected() as scratch:
-            for path in (scratch.root / "elsewhere" / "data" / "raw" / "x", scratch.root / "e" / "DATA" / "Raw" / "x", scratch.root / "data" / "raw",
-                         "\\\\?\\" + str(scratch.root / "e" / "data" / "raw" / "x"), str(scratch.root / "e" / "data" / "raw ") + "\\x",
-                         str(scratch.root / "e" / "data" / "raw.") + "\\x", str(scratch.root / "e" / "data" / "raw::$DATA") + "\\x"):
+            for path in (scratch.root / "elsewhere" / "data" / "raw" / "x", scratch.root / "e" / "DATA" / "Raw" / "x", scratch.root / "data" / "raw"):
                 self.assertEqual(scratch.guard.forbidden_reason(path), "data/raw/", str(path))
+            for path in ("\\\\?\\" + str(scratch.root / "e" / "data" / "raw" / "x"), str(scratch.root / "e" / "data" / "raw ") + "\\x",
+                         str(scratch.root / "e" / "data" / "raw.") + "\\x", str(scratch.root / "e" / "data" / "raw::$DATA") + "\\x"):
+                self.assertTrue(scratch.guard.forbidden_reason(path).startswith(scratch.guard.UNSUPPORTED), str(path))
 
     def test_links_into_protected_folders_refused(self):
         """A symlink or junction that points into a protected folder is refused through its resolved target (kills realpath replaced by abspath)."""
@@ -118,8 +119,7 @@ class ForbiddenPathTests(unittest.TestCase):
         allowed = [
             ROOT_DIR / "data" / "silver" / "hosts.parquet", ROOT_DIR / "data" / "gold" / "accounts.parquet", ROOT_DIR / "data" / "rawish" / "x.parquet",
             ROOT_DIR / "data" / "raw2" / "x.parquet", ROOT_DIR / "data" / "raw_copy" / "x.parquet", str(ROOT_DIR / "data" / "raw" / ".." / "silver" / "x.parquet"),
-            "D:/Cyber_DataSet2/x.parquet", "D:/Cyber_DataSet_copy/x.parquet", "D:/other/x.parquet", "\\\\?\\D:\\Cyber_DataSet2\\x",
-            "\\\\localhost\\D$\\Cyber_DataSet2\\x", Path(tempfile.gettempdir()) / "scratch.parquet",
+            "D:/Cyber_DataSet2/x.parquet", "D:/Cyber_DataSet_copy/x.parquet", "D:/other/x.parquet", Path(tempfile.gettempdir()) / "scratch.parquet",
         ]
         for path in allowed:
             self.assertIsNone(GUARD.forbidden_reason(path), str(path))
@@ -132,6 +132,133 @@ class ForbiddenPathTests(unittest.TestCase):
         self.assertNotRegex(source, r"environ|getenv|argparse|argv")
         for stage in sorted((ROOT_DIR / "pipeline").glob("*.py")):
             self.assertNotRegex(stage.read_text(encoding="utf-8"), r"DATASET_DIR\s*=|RAW_DIR\s*=|guard\.(DATASET_DIR|RAW_DIR)", stage.name)
+
+
+def analog_strings(scratch):
+    """Return (label, string) pairs: every spelling QA found against the real folders, rebuilt over the scratch analog folders (nothing is written)."""
+    host = socket.gethostname()
+    pairs = []
+    for label, folder in (("dataset", scratch.dataset), ("raw", scratch.raw)):
+        full = str(folder)
+        drive, rest = full[0], full[2:]
+        back = rest.replace("/", "\\")
+        pairs += [
+            (label + " globalroot", "\\\\?\\GLOBALROOT\\Device\\HarddiskVolume5" + back + "\\x.parquet"),
+            (label + " volume guid", "\\\\?\\Volume{fcf459af-bb60-412a-960c-6979b1cc2127}" + back + "\\x.parquet"),
+            (label + " nt prefix", "\\??\\" + full + "\\x"),
+            (label + " unc lan ip", "\\\\192.168.1.7\\" + drive + "$" + back + "\\x"),
+            (label + " unc ipv6 literal", "\\\\0-0-0-0-0-0-0-1.ipv6-literal.net\\" + drive + "$" + back + "\\x"),
+            (label + " unc own host name", "\\\\" + host + "\\" + drive + "$" + back + "\\x"),
+            (label + " unc loopback 127.0.0.2", "\\\\127.0.0.2\\" + drive + "$" + back + "\\x"),
+            (label + " unc localhost dot", "\\\\localhost.\\" + drive + "$" + back + "\\x"),
+            (label + " device namespace", "\\\\.\\" + full + "\\x"),
+            (label + " extended forward slashes", "//?/" + folder.as_posix() + "/x"),
+            (label + " stream on folder", folder.as_posix() + ":evil"),
+            (label + " stream on file", full + "\\x::$DATA"),
+            (label + " index allocation", full + ":$I30:$INDEX_ALLOCATION\\x"),
+            (label + " index allocation short", full + "::$INDEX_ALLOCATION\\x"),
+            (label + " folder trailing dot", full + ".\\x"),
+            (label + " folder trailing space", full + " \\x"),
+            (label + " folder trailing dot and space", full + ". \\x"),
+            (label + " folder trailing no-break space", full + "\xa0\\x"),
+            (label + " folder trailing zero-width space", full + "\u200b\\x"),
+            (label + " every part trailing dot", drive + ":\\" + "\\".join(part + "." for part in full[3:].split("\\")) + "\\x"),
+            (label + " drive relative", drive + ":" + back.lstrip("\\") + "\\x"),
+            (label + " drive only", drive + ":"),
+            (label + " nul character", full + "\\x\x00y"),
+            (label + " question mark", full + "\\x?"),
+            (label + " mixed separators", full.replace("\\", "/", 2) + "\\x.parquet"),
+            (label + " doubled separators", full.replace("\\", "\\\\") + "\\\\x"),
+            (label + " dotdot back in", full + "\\sub\\..\\x"),
+        ]
+    return pairs
+
+
+class AllowlistTests(unittest.TestCase):
+    """The allowlist rule: every QA spelling is refused on the scratch analog of both folders; plain neighbours stay allowed."""
+
+    def test_every_spelling_refused_on_the_analog(self):
+        """All QA spellings (the seven that used to pass and the rest) are refused through forbidden_reason and check_output_path; nothing is created."""
+        with SUPPORT.scratch_protected() as scratch:
+            for label, text in analog_strings(scratch):
+                self.assertIsNotNone(scratch.guard.forbidden_reason(text), f"{label}: {text!r}")
+                with self.assertRaises(SystemExit) as caught:
+                    scratch.guard.check_output_path(text)
+                self.assertIn("refusing to write", str(caught.exception), label)
+            self.assertEqual(SUPPORT.scratch_files(scratch), [])
+            self.assertEqual(sorted(p.name for p in scratch.root.iterdir()), ["ds_scratch", "raw_scratch"])
+
+    def test_the_seven_qa_strings_by_form(self):
+        """The seven strings that used to pass are refused for the right reason (unsupported form), with the real constants and with the analog."""
+        real = ["\\\\?\\GLOBALROOT\\Device\\HarddiskVolume5\\Cyber_DataSet\\x.parquet",
+                "\\\\?\\Volume{fcf459af-bb60-412a-960c-6979b1cc2127}\\Cyber_DataSet\\x.parquet", "\\??\\D:\\Cyber_DataSet\\x",
+                "\\\\192.168.1.7\\D$\\Cyber_DataSet\\x", "\\\\0-0-0-0-0-0-0-1.ipv6-literal.net\\D$\\Cyber_DataSet\\x", "D:/Cyber_DataSet:evil",
+                "D:/CyberAgents/data/raw:evil"]
+        for text in real:
+            self.assertTrue(GUARD.forbidden_reason(text).startswith(GUARD.UNSUPPORTED), text)
+
+    def test_unsupported_reason_is_readable(self):
+        """The refusal text names the path and says why, and the exit value is a message string."""
+        with SUPPORT.scratch_protected() as scratch:
+            with self.assertRaises(SystemExit) as caught:
+                scratch.guard.check_output_path(str(scratch.dataset) + ":evil")
+            self.assertIsInstance(caught.exception.code, str)
+            self.assertIn("alternate data stream", caught.exception.code)
+            self.assertIn(":evil", caught.exception.code)
+
+    def test_plain_neighbours_allowed(self):
+        """Plain drive paths, relative paths and look-alike names stay allowed (data/raw2, data/silver, data/gold, scratch dirs, Cyber_DataSet2)."""
+        with SUPPORT.scratch_protected() as scratch:
+            for path in (scratch.root / "data" / "raw2" / "x", scratch.root / "data" / "silver" / "x", scratch.root / "data" / "gold" / "x",
+                         scratch.root / "ds_scratch2" / "x", scratch.root / "raw_scratch_copy" / "x", scratch.root / "a b" / "x.parquet",
+                         scratch.root.as_posix() + "/ok/x", "data/silver/x.parquet", "./x.parquet", "x.parquet", "", ".", ".."):
+                self.assertIsNone(scratch.guard.forbidden_reason(path), str(path))
+        for path in ("D:/Cyber_DataSet2/x", "D:/Cyber_DataSet_x/x", "data/raw2/x", "data/silver/hosts.parquet", "data/gold/accounts.parquet"):
+            self.assertIsNone(GUARD.forbidden_reason(path), path)
+
+    def test_each_form_rule_fires_alone(self):
+        """One input per allowlist rule, each carrying its own reason text (kills a dropped rule)."""
+        cases = {"\\\\host\\share\\x": "double slash", "//?/C:/x": "double slash", "C:x": "drive-relative", "C:": "drive-relative",
+                 "C:/a:b": "colon", "a:b/x": "drive-relative", "x/y:z": "colon", "x\x00y": "control", "x/a?b": "invalid character",
+                 "x/a*b": "invalid character", 'x/a"b': "invalid character", "x/a|b": "invalid character", "x/a<b": "invalid character",
+                 "x/dir./y": "trailing dot", "x/dir /y": "trailing dot", "x/dir\xa0/y": "trailing dot", "x/dir\u200b/y": "trailing dot",
+                 "x/dir\ufeff/y": "trailing dot", "x/GlobalRoot/y": "namespace", "x/Volume{abc}/y": "namespace", "x/y.": "trailing dot", "x/y ": "trailing dot"}
+        expected = {"double slash": "leading double slash", "drive-relative": "drive-relative", "colon": "colon other than", "control": "control or Windows-invalid",
+                    "invalid character": "control or Windows-invalid", "trailing dot": "ends in a dot, space or invisible", "namespace": "device or volume namespace"}
+        for text, key in cases.items():
+            reason = GUARD.forbidden_reason(text)
+            self.assertIsNotNone(reason, repr(text))
+            self.assertIn(expected[key], reason, repr(text))
+
+    def test_resolve_failure_is_a_clean_refusal(self):
+        """An OSError or ValueError while resolving is a refusal with a message, never a traceback."""
+        with SUPPORT.scratch_protected() as scratch:
+            for error in (OSError("boom"), ValueError("embedded null")):
+                with mock.patch.object(scratch.guard.os.path, "realpath", side_effect=error):
+                    reason = scratch.guard.forbidden_reason("x/y.parquet")
+                    self.assertIn("cannot be resolved", reason)
+                    with self.assertRaises(SystemExit) as caught:
+                        scratch.guard.check_output_path("x/y.parquet")
+                    self.assertIn("refusing to write", str(caught.exception))
+
+    def test_identity_check_catches_an_alias_the_name_compare_misses(self):
+        """With the name comparison disabled, a path inside a scratch folder is still refused by file identity (samefile on an ancestor)."""
+        with SUPPORT.scratch_protected() as scratch:
+            (scratch.dataset / "sub").mkdir()
+            with mock.patch.object(scratch.guard, "is_under", return_value=False):
+                for folder in (scratch.dataset, scratch.raw):
+                    self.assertIsNotNone(scratch.guard.forbidden_reason(folder / "sub" / "x.parquet"), str(folder))
+                self.assertIsNone(scratch.guard.forbidden_reason(scratch.root / "elsewhere" / "x.parquet"))
+            self.assertEqual(SUPPORT.scratch_files(scratch), [])
+
+    def test_resolved_compare_catches_a_link_when_identity_is_disabled(self):
+        """With the identity check disabled, a link into a protected folder is still refused by the resolved-path comparison."""
+        with SUPPORT.scratch_protected() as scratch:
+            link = scratch.root / "alias"
+            if not make_link(link, scratch.dataset):
+                self.skipTest("this OS refused to create both a symlink and a junction")
+            with mock.patch.object(scratch.guard, "same_object_ancestor", return_value=False):
+                self.assertIsNotNone(scratch.guard.forbidden_reason(link / "x.parquet"))
 
 
 class RealFoldersNotTouchedTests(unittest.TestCase):
