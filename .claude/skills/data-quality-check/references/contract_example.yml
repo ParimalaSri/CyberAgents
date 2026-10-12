@@ -14,9 +14,35 @@ columns:
   host_count: {type: BIGINT, nullable: false, min: 1}
   unresolved_pct: {type: DOUBLE, min: 0, max: 100}
 
-denylist:                            # cloud/CDN/ISP names must never be companies
+# Denylist leakage. Two forms; use the shared form for any layer that holds company names.
+#  (1) shared rules (preferred): applies EXACTLY the pipeline rules by importing scripts/denylist_match.py
+#      (exact, word-boundary prefix, CIDR/glob pattern, keyword; accent-folded; org text only, the isp text is never matched, D5).
+#      Fails if ANY value in the column matches and prints up to 5 example names with the rule type. Fails loudly if the
+#      matcher or a rule file is missing. Optional `context_dir` points at another folder of rule files (default: context/).
+denylist:
   column: company_name
-  file: context/denylist.txt         # one lowercase name per line, # for comments
+  rules: shared
+# (2) old exact-file form (still supported): names are compared after normalising BOTH sides with the shared normalise(),
+#     so case, accent, punctuation and legal-suffix variants are caught, but prefix, pattern and keyword rules are NOT applied.
+# denylist:
+#   column: company_name
+#   file: context/denylist.txt
+
+# Optional: infra_reason must be one of the matcher's INFRA_REASONS (cloud_provider, tag_rule, ip_pattern, org_exact, org_prefix,
+# org_pattern, org_keyword). Any other value, especially isp_*, fails. Use on the hosts layer. `nullable: false` also fails on nulls.
+# infra_reason:
+#   column: infra_reason
+#   nullable: true
+
+# Optional: category shares (D4). Shares sum to 100% with no null and only `allowed` values; `weight` (optional) is a row-count
+# column to weight by; the share of `resolved_values` must be inside resolved_min..resolved_max (percent).
+# shares:
+#   column: identity_source
+#   weight: host_count
+#   allowed: [org, cert_o, infrastructure_unresolved, null_org, noise]
+#   resolved_values: [org, cert_o]
+#   resolved_min: 5
+#   resolved_max: 20
 
 checks:                              # custom SQL on the view `t`; must return one number
   - name: no empty company names

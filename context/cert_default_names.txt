@@ -1,0 +1,94 @@
+# CyberIntel default / placeholder certificate organisation names (PROPOSED, not approved). Used by D4 rule 3 (cert_o):
+# a cert subject O that matches an entry (after normalise() in scripts/denylist_match.py) is NOT a tenant identity.
+# Source: ssl.cert.subject.O values seen in data/sample/spread_100k.jsonl (2,152 non-null; 849 distinct).
+# Also ignore any cert O that matches denylist.txt, denylist_prefixes.txt or denylist_patterns.txt (vendors, clouds).
+# Entries are already in normalised form (legal suffixes dropped, punctuation stripped).
+
+# --- placeholder / library defaults ---
+acme co
+default company
+internet widgits
+someorganization
+my company
+mycompany
+company
+companyname
+organization
+testorganization
+testcompany
+xx
+xxx
+none
+na
+unknown
+unspecified
+blah
+webserver
+certificate
+self signed
+self signed certificate
+temporary certificate
+mkcert development certificate
+system nodes
+kubernetes
+k3s
+
+# --- control panels and web servers that self-sign (name the software, not the owner) ---
+plesk
+parallels
+bt panel
+hestia control panel
+vesta control panel
+centos web panel
+fastpanel
+directadmin self signed
+dovecot mail server
+courier mail server
+serverbackup
+
+# --- network device and appliance vendors that self-sign on firmware (name the vendor, not the owner) ---
+https management certificate for sonicwall self signed
+pfsense webconfigurator self signed certificate
+netgate pfsense plus webconfigurator self signed certificate
+netgate pfsense plus gui default self signed certificate
+cisco systems
+fortinet
+synology
+draytek
+zyxel
+ubiquiti networks
+ubiquiti
+watchguard
+lancom systems
+hillstone networks
+qnap systems
+microhard systems
+ugreen
+eero
+hikvision
+
+# --- D6.4 / DQ-001 additions (2026-10-11): device vendors and carriers whose cert O names the maker or the operator, not a tenant ---
+# Spellings verified against data/silver/hosts.parquet cert_subject_o / name_norm (identity_source = cert_o). Rows on the spread sample in brackets.
+huawei
+huawei technologies
+huawei software technologies
+sierra wireless
+ruckus wireless
+aruba networks
+arista networks
+mitel networks
+technicolor
+rakwireless
+# comcast covers both "Comcast" and "Comcast Corporation" (legal suffix dropped by normalise)
+comcast
+ntt docomo business
+# China Telecom Cloud (Tianyi Cloud Technology Co., Ltd.) as it appears in the data
+天翼云科技有限公司
+# dis: 7 rows, all self-signed mail-server (smtp/imap/pop3) certs with CN www.example.com or localhost, O="Dis" is a template default, not a tenant
+dis
+
+# --- name guard: own-estate names that sit on CDN / cache-node ranges (the cert O is the CDN operator, not a customer) ---
+meta platforms
+facebook
+apple
+netflix

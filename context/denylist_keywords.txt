@@ -1,0 +1,52 @@
+# CyberIntel denylist KEYWORDS (PROPOSED, not approved). Decisions D2 and D4 in docs/ARCHITECTURE.md section 15; RAW-013.
+# Rule: a keyword matches when its words appear as a whole-word (word-sequence) run anywhere in the NORMALISED org name
+# (scripts/denylist_match.py normalise() then matches_keyword()). It is NOT an arbitrary substring match:
+# "hosting" matches "Krystal Hosting Ltd" but not "webhosting"; "vpn" does not match "vpnsoft".
+# The isp text is NEVER matched in the default mode (D5, docs/ARCHITECTURE.md section 15): org-scoped and unscoped keywords therefore behave the same
+# way, both on the org text only. The scope only matters if a caller asks for the old isp matching (isp_matching="exclude", kept only to reproduce
+# the old counts); in that mode an unscoped keyword also matches the isp text and an org-scoped one does not.
+# SYNTAX (field scope, RAW-013): one entry per line.
+#   phrase          unscoped: matches the org text (and, only in the old "exclude" mode, the isp text).
+#   org: phrase     org-scoped: matches the org text ONLY, in every mode. Use it for words common in CARRIER names.
+#   Any other scope word (for example "isp:") is rejected with an error. Callers pass field="org" or field="isp" to matches_keyword.
+# This file lists ONLY keywords that PASSED the precision gate: at least 90% of up to 50 reviewed newly-excluded distinct orgs
+# classified INFRA (ISP, telecom, hosting, VPN, data centre, network provider) from the org name text alone, UNSURE counted as REAL.
+# Gate figures and the keywords that failed are in outputs/denylist_keyword_review.md. Re-run the gate before adding a keyword.
+# Gate results (INFRA / reviewed): chinanet 45/50, hosting 47/50, vpn 4/4, internet service provider 15/15, broadband 47/50,
+# web hosting 8/8, vps 9/9, telecommunications 46/50, cable 46/50, fibre 10/11, dedicated 20/22.
+chinanet
+hosting
+vpn
+internet service provider
+broadband
+web hosting
+vps
+telecommunications
+fibre
+# Removed by the owner on 2026-10-11 as ordinary words (too generic to mean infrastructure): telephone, cable, dedicated. They had passed the
+# gate (cable 46/50, dedicated 20/22, telephone 20/20 org-only) but are no longer applied. Gate figures for them are kept in the review files.
+# ORG-ONLY entries (gate run on org text only, among rows surviving every other rule; figures in outputs/denylist_orgonly_review.md):
+# gate results (INFRA / reviewed): telecom 47/50 (re-run after folding), telekom 32/35,
+# telecommunication 20/20, telefonica 23/24 (merged with the accented telefonica spellings), telephone 20/20, telecoms 3/3, telkom 5/5, telcom 4/4.
+# normalise() now folds Latin accents (scripts/denylist_match.py), so "telefônica" and "telefónica" are the same keyword as "telefonica".
+# Folding also merged telecomunicacoes with telecomunicações: the merged keyword scored 36/42 = 85.7% and is NOT applied (it was enabled before
+# folding at 25/27 on the ASCII spelling only). Failed and not applied: telecomunicacoes (merged) 36/42, telecomunicaciones 13/19,
+# telecomunicazioni 2/5, telekommunikation 5/6, telekomunikasi 2/3, telco 0/1. Figures: outputs/denylist_accent_folding.md.
+org: telecom
+org: telekom
+org: telecommunication
+org: telefonica
+org: telecoms
+org: telkom
+org: telcom
+# Added 2026-10-11 (D5 follow-up): ovh passed the gate 6/6 (100%; only 6 distinct orgs were newly matched, all reviewed): OVH Singapore, OVH Hispano,
+# OVH (NWK), OVH BE, OVH Australia, Dedicated servers OVH. Whole word only: OVHTECH is NOT matched (no space-delimited "ovh"). Figures: outputs/denylist_cleanup_review.md.
+org: ovh
+
+# Added 2026-10-11 (D6.7 gates, outputs/denylist_cleanup_review.md section 8). Gate results (INFRA / reviewed, names only, UNSURE counted REAL):
+# unicom 46/47 (1 UNSURE: Unicom (Jiangsu) Industry Internet Co), province network 38/38, *hosting (compound) 30/30.
+org: unicom
+org: province network
+# Compound word (D6.7): "*hosting" matches ONE token that ends with "hosting" and has a stem (webhosting, EGIHosting, BisectHosting). It is not a
+# substring match; "ghosting" is excluded and "hostingbazis" is not matched. See COMPOUND_EXCLUDE in scripts/denylist_match.py.
+org: *hosting

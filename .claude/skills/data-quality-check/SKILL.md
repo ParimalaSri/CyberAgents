@@ -23,6 +23,11 @@ Arguments: `$ARGUMENTS`
 1. If no contract exists yet, draft one from `references/contract_example.yml` and the layer's
    schema, then ask the user to approve it. Contracts are written before checks are trusted.
 2. Run `python .claude/skills/data-quality-check/scripts/check_contract.py context/contracts/<layer>.yml --report`.
+   The denylist check applies the same rules as the pipeline through `scripts/denylist_match.py`
+   (exact, prefix, pattern, keyword; accent-folded; org text only, never isp). Use
+   `denylist: {column, rules: shared}`; the old `{column, file}` form is exact-only. Other checks:
+   `infra_reason` (values must be in the matcher's `INFRA_REASONS`) and `shares` (shares sum to 100%,
+   resolved share inside a range).
 3. Add the judgement checks from `references/checks_catalogue.md` (random rows, top/bottom 20,
    row count differences) and record what was seen.
 4. Return a verdict: PASS or FAIL, with evidence for every failure.
@@ -44,13 +49,14 @@ Arguments: `$ARGUMENTS`
 
 ```
 **FAIL**: 7/8 checks passed
-| FAIL | denylist leakage in 'company_name' | hits: [('amazon.com, inc.', 412)] |
+| FAIL | denylist leakage in 'company_name' | 897 distinct names match; e.g. 'Contabo GmbH' x1 [exact: contabo] |
 ```
-Verdict FAIL. Root cause candidate: normalisation lowercases after the denylist comparison.
+Verdict FAIL. Root cause candidate: the stage applies only the exact list, not prefix, keyword and pattern rules.
 Entry added to `docs/ISSUES.md`; control returns to the author (`pipeline-stage-build`).
 (Numbers illustrative.)
 
 ## Files
-- `scripts/check_contract.py` contract runner (DuckDB + pyyaml)
+- `scripts/check_contract.py` contract runner (DuckDB + pyyaml; imports the shared denylist matcher)
+- `scripts/test_check_contract.py` tests for the runner
 - `references/contract_example.yml` contract format
 - `references/checks_catalogue.md` which checks each layer needs

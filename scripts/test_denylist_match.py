@@ -1,0 +1,306 @@
+"""Self-test for scripts/denylist_match.py (run: python scripts/test_denylist_match.py)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import denylist_match as dm
+
+
+def check(condition, label):
+    """Fail loudly with the label when a condition is false."""
+    if not condition:
+        raise AssertionError(label)
+
+
+def accent_cases():
+    """Return accent-folding assertions: Latin accents fold, other scripts survive, lists share the folded form."""
+    norm = dm.normalise
+    out = [
+        norm("TELEFÔNICA BRASIL") == norm("Telefónica Brasil") == norm("telefonica brasil") == "telefonica brasil",
+        norm("São Paulo") == "sao paulo",
+        norm("Ação Ltda") == "acao ltda",
+        norm("Müller GmbH") == "muller",
+        norm("España Ñandú") == "espana nandu",
+        norm("Café Société Anonyme") == "cafe societe anonyme",
+        norm("Ça va") == "ca va",
+        norm("TELEFÔNICA") == norm("telefônica") == norm("TELEFONICA"),
+        norm("Telecomunicações") == norm("TELECOMUNICAÇOES") == "telecomunicacoes",
+        norm("Ａｃｍｅ") == "acme",
+        norm("á") == "a" and norm("école") == norm("école") == "ecole",
+        norm("Telefónica") == norm(dm.fold_accents("Telefónica")),
+        norm("中国电信集团有限公司") == "中国电信集团有限公司",
+        norm("中国电信") != "" and norm("株式会社") != "",
+        norm("Яндекс Й") == "яндекс й",
+        norm("ООО Ростелеком") == "ооо ростелеком",
+        norm("شركة الاتصالات") == "شركة الاتصالات",
+        norm("서울 통신") == "서울 통신",
+        norm("Salesforce, Inc.") == "salesforce",
+        norm(None) == "" and norm("") == "",
+    ]
+    out.append(dm.matches_keyword(norm("TELEFÔNICA BRASIL S.A"), [dm.parse_keyword_entry("org: telefónica")]) == "telefonica")
+    out.append(dm.matches_keyword(norm("Telefónica Celular de Bolivia"), [dm.parse_keyword_entry("org: telefonica")]) == "telefonica")
+    out.append(dm.matches_keyword(norm("中国电信集团有限公司"), [dm.parse_keyword_entry("org: telecom")]) is None)
+    out.append(dm.matches_prefix(norm("Telefônica Brasil S.A"), [norm("telefónica brasil")]) == "telefonica brasil")
+    out.append(dm.matches_pattern("Telefónica-Réseau", ["*telefonica-reseau*"]) and dm.matches_pattern("139.162.1.1", ["139.162.0.0/16"]))
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        files = {
+            "e.txt": ["Telefónica Brasil S.A."],
+            "p.txt": ["Ação Telecom"],
+            "k.txt": ["org: telefônica", "telefonica", "org: telefonica"],
+            "c.txt": ["Société Générale"],
+            "g.txt": ["*TELEFÓNICA*"],
+        }
+        for name, lines in files.items():
+            (base / name).write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+        out.append(dm.load_exact(base / "e.txt") == {"telefonica brasil s a"})
+        out.append(dm.load_prefixes(base / "p.txt") == ["acao telecom"])
+        out.append([(str(k), k.scope) for k in dm.load_keywords(base / "k.txt")] == [("telefonica", "org"), ("telefonica", "any")])
+        out.append(dm.load_cert_defaults(base / "c.txt") == {"societe generale"})
+        out.append(dm.load_patterns(base / "g.txt") == ["*telefonica*"])
+    out.append("" not in dm.load_exact() and "" not in dm.load_cert_defaults())
+    return out
+
+
+def isp_cases():
+    """Return assertions for the isp-matching switch, the website-builder prefixes and the removed generic keywords."""
+    rules = dm.load_rules()
+    norm = dm.normalise
+    abtc = {"org": "ABTC IMOVEIS LTDA ME", "isp": "TELEFONICA BRASIL S.A", "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = [
+        dm.DEFAULT_ISP_MATCHING == "ignore",
+        dm.infrastructure_reason(abtc, rules) is None,
+        dm.infrastructure_reason(abtc, rules, isp_matching="ignore") is None,
+        dm.infrastructure_reason(abtc, rules, isp_matching="exclude") == "isp_exact",
+        dm.infrastructure_reason(dict(abtc, org="Google LLC"), rules) == "org_exact",
+        dm.infrastructure_reason(dict(abtc, org="Google LLC", isp="x"), rules) == "org_exact",
+        dm.infrastructure_reason(dict(abtc, cloud_provider="Oracle Cloud Infrastructure"), rules) == "cloud_provider",
+        dm.infrastructure_reason(dict(abtc, tags=["cdn"]), rules) == "tag_rule",
+        dm.infrastructure_reason(dict(abtc, tags=["cloud", "eol-os"]), rules) == "tag_rule",
+        dm.infrastructure_reason(dict(abtc, ip="139.162.5.5"), rules) == "ip_pattern",
+        dm.infrastructure_reason(dict(abtc, org="Krystal Hosting Ltd", isp=None), rules) == "org_keyword",
+        dm.infrastructure_reason(dict(abtc, org=None, isp="Google LLC"), rules) is None,
+        dm.infrastructure_reason(dict(abtc, org=None, isp="Google LLC"), rules, isp_matching="exclude") == "isp_exact",
+        dm.matches_prefix(norm("Automattic, Inc"), rules["prefixes"]) == "automattic",
+        dm.matches_prefix(norm("TUMBLR, INC."), rules["prefixes"]) == "tumblr",
+        dm.matches_prefix(norm("Automattic Consulting"), rules["prefixes"]) == "automattic",
+        dm.matches_prefix(norm("Tumblrfoo Corp"), rules["prefixes"]) is None,
+        dm.match_name("Telephone Answering Service Inc", "org", rules) is None,
+        dm.match_name("Cable Car Museum", "org", rules) is None,
+        dm.match_name("Dedicated Staffing LLC", "org", rules) is None,
+        dm.match_name("Acme Fibre Networks", "org", rules) == ("keyword", "fibre"),
+        dm.match_name(None, "org", rules) is None,
+    ]
+    for bad in ("cable", "dedicated", "telephone"):
+        out.append(bad not in [str(k) for k in rules["keywords"]])
+    try:
+        dm.infrastructure_reason(abtc, rules, isp_matching="sometimes")
+        out.append(False)
+    except ValueError:
+        out.append(True)
+    return out
+
+
+def d5_followup_cases():
+    """Return assertions for the org-scoped ovh keyword, the webflow prefix and the pinned infra_reason value set."""
+    rules = dm.load_rules()
+    norm = dm.normalise
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = [
+        ("ovh", "org") in [(str(k), k.scope) for k in rules["keywords"]],
+        dm.match_name("OVH Singapore PTE. LTD", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("OVH Hispano", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("OVH (NWK)", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("Dedicated servers OVH", "org", rules) == ("keyword", "ovh"),
+        dm.match_name("OVHTECH R&D (INDIA) PRIVATE LIMITED", "org", rules) is None,
+        dm.match_name("Hovhannes Consulting", "org", rules) is None,
+        dm.match_name("Novhost Media", "org", rules) is None,
+        dm.match_name("OVH Singapore", "isp", rules) is None,
+        dm.infrastructure_reason(dict(base, org="OVH BE"), rules) == "org_keyword",
+        dm.infrastructure_reason(dict(base, isp="OVH SAS"), rules) is None,
+        "ovh" not in rules["prefixes"] and "ovh" not in dm.load_prefixes(),
+        dm.matches_prefix(norm("Webflow, Inc"), rules["prefixes"]) == "webflow",
+        dm.matches_prefix(norm("Webflow Agency Ltd"), rules["prefixes"]) == "webflow",
+        dm.matches_prefix(norm("Webflowers Florist"), rules["prefixes"]) is None,
+        dm.infrastructure_reason(dict(base, org="Webflow, Inc"), rules) == "org_prefix",
+    ]
+    samples = {
+        "cloud_provider": dict(base, cloud_provider="Oracle Cloud Infrastructure"),
+        "tag_rule": dict(base, tags=["cdn"]),
+        "ip_pattern": dict(base, ip="139.162.5.5"),
+        "org_exact": dict(base, org="Google LLC"),
+        "org_prefix": dict(base, org="Webflow, Inc"),
+        "org_pattern": dict(base, org="139.162.0.0/16"),
+        "org_keyword": dict(base, org="Krystal Hosting Ltd"),
+    }
+    emitted = {key: dm.infrastructure_reason(row, rules) for key, row in samples.items()}
+    out.append(emitted == {key: key for key in samples})
+    out.append(set(emitted.values()) == set(dm.INFRA_REASONS) and len(dm.INFRA_REASONS) == 7)
+    out.append(set(dm.INFRA_REASONS) == {"cloud_provider", "tag_rule", "ip_pattern", "org_exact", "org_prefix", "org_pattern", "org_keyword"})
+    isp_only = dict(base, org="ABTC IMOVEIS LTDA ME", isp="Google LLC")
+    out.append(dm.infrastructure_reason(isp_only, rules) is None)
+    out.append(not any(value.startswith("isp_") for value in emitted.values()))
+    return out
+
+
+def d6_cert_cases():
+    """Return assertions for the D6.4 cert default additions (vendors, carriers, name guard, dis) and for real tenants staying usable."""
+    defaults = dm.load_cert_defaults()
+    norm = dm.normalise
+    listed = [
+        "Huawei", "Huawei Technologies Co., Ltd", "Huawei Software Technologies Co., Ltd.", "Sierra Wireless, Inc.", "Ruckus Wireless Inc.",
+        "Aruba Networks", "Arista Networks, Inc.", "Mitel Networks Corporation", "Technicolor", "RAKwireless", "Comcast Corporation", "Comcast",
+        "NTT DOCOMO BUSINESS, Inc.", "天翼云科技有限公司", "Dis", "Meta Platforms, Inc.", "Facebook, Inc.", "Apple Inc.", "Netflix, Inc.",
+    ]
+    tenants = ["Accenture", "Okta, Inc.", "Datadog, Inc.", "SAP SE", "Salesforce, Inc.", "Royal Bank of Scotland", "Disney Enterprises, Inc", "Aruba S.p.A."]
+    out = [norm(name) in defaults for name in listed]
+    out.extend(norm(name) not in defaults for name in tenants)
+    return out
+
+
+def d6_gate_cases():
+    """Return assertions for the D6.7 rules: org-scoped unicom and province network, the compound *hosting keyword and the named operator prefixes."""
+    rules = dm.load_rules()
+    norm = dm.normalise
+    match = dm.match_name
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = [
+        match("China Unicom Henan province network", "org", rules) == ("keyword", "unicom"),
+        match("UNICOM ZheJiang Province Network", "org", rules) == ("keyword", "unicom"),
+        match("CNCGROUP Zhejiang Province Network", "org", rules) == ("keyword", "province network"),
+        match("Unicomer Group", "org", rules) is None,
+        match("China Unicom Henan province network", "isp", rules) is None,
+        ("unicom", "org") in [(str(k), k.scope) for k in rules["keywords"]],
+        ("province network", "org") in [(str(k), k.scope) for k in rules["keywords"]],
+    ]
+    star = dm.parse_keyword_entry("org: *hosting")
+    out.append(star == "hosting" and star.scope == "org" and star.mode == "suffix")
+    out.append(dm.parse_keyword_entry("hosting").mode == "word")
+    for name in ["EGIHosting", "webhosting servers", "BisectHosting", "FREAKHOSTING", "swhosting.com", "AHOSTING", "managedhosting.de GmbH", "Serverpars Webhosting (Pars.host)"]:
+        out.append(match(name, "org", rules) is not None)
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_keyword")
+    out.append(dm.matches_keyword(norm("webhosting servers"), [star]) == "hosting")
+    out.append(dm.matches_keyword(norm("Ghosting Media Ltd"), [star]) is None)
+    out.append(dm.matches_keyword(norm("HostingBazis Bt."), [star]) is None)
+    out.append(dm.matches_keyword(norm("Hosting Solutions"), [star]) is None)
+    out.append(dm.matches_keyword(norm("Hostingly Inc"), [star]) is None)
+    out.append(dm.matches_keyword(norm("Krystal Hosting Ltd"), [dm.parse_keyword_entry("hosting")]) == "hosting")
+    out.append(dm.matches_keyword(norm("EGIHosting"), [dm.parse_keyword_entry("hosting")]) is None)
+    out.append(dm.matches_keyword(norm("EGIHosting"), [star], field="isp") is None)
+    out.append(match("EGIHosting", "isp", rules) is None)
+    for bad in ["org: *", "org: *web hosting"]:
+        try:
+            dm.parse_keyword_entry(bad)
+            out.append(False)
+        except ValueError:
+            out.append(True)
+    out.append(len({(str(k), k.scope, k.mode) for k in rules["keywords"]}) == len(rules["keywords"]))
+    named = {
+        "RackNerd LLC": "racknerd", "NTT America, Inc.": "ntt america", "IONOS Inc.": "ionos", "Telstra Limited": "telstra", "Vodafone Deutschland GmbH": "vodafone",
+        "Fastweb SpA": "fastweb", "Uninet S.A. de C.V.": "uninet", "CLIENTE ANTEL URUGUAY": "cliente antel", "Administracion Nacional de Telecomunicaciones": "administracion nacional de telecomunicaciones", "Web.com Group, Inc.": "web com",
+        "PSINet, Inc.": "psinet", "Comcast IP Services, L.L.C.": "comcast", "CloudFly Net Inc": "cloudfly",
+    }
+    for name, family in named.items():
+        out.append(dm.matches_prefix(norm(name), rules["prefixes"]) == family)
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    for real in ["NTT DATA", "NTT DOCOMO,INC.", "Ionosphere Research Lab", "Comcastic Media", "Web Commerce Partners", "Telstrand AB", "Racknerdy Co"]:
+        out.append(dm.infrastructure_reason(dict(base, org=real), rules) is None)
+    # gate (a) was superseded by D7.1: see d7_cache_operator_cases
+    return out
+
+
+def d7_cache_operator_cases():
+    """Return assertions for the D7.1 cache-operator prefixes: four named orgs match, Apple does not, and any org starting with those words also matches."""
+    rules = dm.load_rules()
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = []
+    for name in ["Netflix Streaming Services Inc.", "Netflix Luxembourg S.a.r.l.", "Meta Platforms Ireland Limited", "Facebook, Inc."]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    out.append(dm.infrastructure_reason(dict(base, org="Apple Inc."), rules) is None)
+    for name in ["Netflix Studios LLC", "Facebook Payments Ltd", "Meta Platforms Technologies"]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    out.append(dm.infrastructure_reason(dict(base, org="Metaverse Labs"), rules) is None)
+    return out
+
+
+def d8_huawei_cases():
+    """Return assertions for the D8.2 huawei prefix: three Huawei group names match, a Brazilian owner string and a non-word-boundary near miss do not."""
+    rules = dm.load_rules()
+    base = {"org": "Plain Co", "isp": None, "cloud_provider": None, "tags": [], "ip": "200.1.1.1"}
+    out = []
+    for name in ["Huawei International Co., Limited", "Huawei Clouds Chile", "Huawei Software Technologies Co., Ltd."]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) == "org_prefix")
+    for name in ["Owner: HUAWEI DO BRASIL", "Huaweix Foods"]:
+        out.append(dm.infrastructure_reason(dict(base, org=name), rules) is None)
+    return out
+
+
+def run_tests():
+    """Run all matcher cases and return how many passed."""
+    kw = ["hosting", "vpn", "internet service provider", "chinanet"]
+    norm = dm.normalise
+    cases = [
+        (matches := dm.matches_keyword)(norm("Krystal Hosting Ltd"), kw) == "hosting",
+        matches(norm("WHG Hosting Services Ltd"), kw) == "hosting",
+        matches(norm("Mullvad VPN AB"), kw) == "vpn",
+        matches(norm("CHINANET-ZJ Taizhou node network"), kw) == "chinanet",
+        matches(norm("Internet Service Provider in Sri Lanka."), kw) == "internet service provider",
+        matches(norm("webhosting servers"), kw) is None,
+        matches(norm("vpnsoft Inc"), kw) is None,
+        matches(norm("Internet Provider Service"), kw) is None,
+        matches(norm("Salesforce, Inc."), kw) is None,
+        matches("", kw) is None,
+        matches(norm(None), kw) is None,
+        dm.normalise("Hosting.de GmbH") == "hosting de",
+        matches(norm("Hosting.de GmbH"), kw) == "hosting",
+    ]
+    loaded = dm.load_keywords()
+    cases.append(len({(str(k), k.scope, k.mode) for k in loaded}) == len(loaded) and "vpn" in loaded and not [k for k in loaded if k == "telecom" and k.scope == "any"])
+    cases.append(dm.matches_prefix(norm("Weebly, Inc."), dm.load_prefixes()) == "weebly")
+    scoped = [dm.parse_keyword_entry("org: telecom"), dm.parse_keyword_entry("hosting")]
+    cases.append(scoped[0] == "telecom" and scoped[0].scope == "org" and scoped[1].scope == "any")
+    cases.append(matches(norm("Bretagne Telecom"), scoped) == "telecom")
+    cases.append(matches(norm("Bretagne Telecom"), scoped, field="org") == "telecom")
+    cases.append(matches(norm("A1 Telekom Telecom Austria"), scoped, field="isp") is None)
+    cases.append(matches(norm("Krystal Hosting Ltd"), scoped, field="isp") == "hosting")
+    cases.append(matches(norm("Krystal Hosting Ltd"), scoped, field="org") == "hosting")
+    cases.append(matches(norm("Acme Telecommunications"), scoped) is None)
+    cases.append(matches(norm("Plain Telecom"), ["telecom"], field="isp") == "telecom")
+    cases.append(dm.parse_keyword_entry("ORG:  Tele Com ") == "tele com")
+    try:
+        dm.parse_keyword_entry("isp: telecom")
+        cases.append(False)
+    except ValueError:
+        cases.append(True)
+    try:
+        matches("x", kw, field="cert")
+        cases.append(False)
+    except ValueError:
+        cases.append(True)
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "kw.txt"
+        path.write_text("# c\nhosting\norg: telecom\norg: telecom\ntelecom\n", encoding="utf-8")
+        loaded_tmp = dm.load_keywords(path)
+        cases.append([(str(k), k.scope) for k in loaded_tmp] == [("hosting", "any"), ("telecom", "org"), ("telecom", "any")])
+        path.write_text("bogus: telecom\n", encoding="utf-8")
+        try:
+            dm.load_keywords(path)
+            cases.append(False)
+        except ValueError:
+            cases.append(True)
+    cases.extend(accent_cases())
+    cases.extend(isp_cases())
+    cases.extend(d5_followup_cases())
+    cases.extend(d6_cert_cases())
+    cases.extend(d6_gate_cases())
+    cases.extend(d7_cache_operator_cases())
+    cases.extend(d8_huawei_cases())
+    for number, ok in enumerate(cases, 1):
+        check(ok, "case " + str(number))
+    return len(cases)
+
+
+if __name__ == "__main__":
+    print(run_tests(), "cases passed")

@@ -1,0 +1,188 @@
+# Contract for the signals gold layer (stage pipeline/3_signals.py), 36 columns (docs/ARCHITECTURE.md D9.4, D9.5, rules D9.9).
+# Ranges come from MEANING, not from observed values (a CVSS score is 0 to 10, a count is >= 0, a band has its fixed set).
+# Run from the repo root (the cross-file checks use relative paths):
+#   python .claude/skills/data-quality-check/scripts/check_contract.py context/contracts/signals.yml --report
+# Checks the generic runner cannot express (independent recompute of every signal from hosts, company_name denylist, coverage,
+# phi pairs, host-blind reconciliation):
+#   python .claude/skills/data-quality-check/scripts/check_signals_extra.py
+layer: signals
+path: data/gold/signals.parquet
+key: company_id          # one row per company (D9.4); the key is unique and non-null
+
+# row_rule: signals rows == companies rows (the join fan-out guard, CLAUDE.md). Parent: data/silver/companies.parquet (the spine).
+# On the FULL run the stage reads companies_full.parquet / hosts_full.parquet and writes signals_full.parquet: change `path`, `other`
+# and the cross-file paths below in the PR that promotes to prod; a contract changes only with a reason.
+row_rule:
+  other: data/silver/companies.parquet
+  op: "=="
+
+columns:
+  # carried unchanged from companies (columns 1-10); equality with companies is a cross-file check below
+  company_id: {type: VARCHAR, nullable: false}
+  company_name: {type: VARCHAR, nullable: false}
+  name_norm: {type: VARCHAR, nullable: false}
+  identity_source: {type: VARCHAR, nullable: false}
+  identity_confidence: {type: VARCHAR, nullable: false}
+  host_count: {type: INTEGER, nullable: false, min: 1}
+  distinct_host_ips: {type: INTEGER, nullable: false, min: 1}
+  country_code: {type: VARCHAR}                         # null only when every host of the company has a null country (as companies)
+  noise_host_count: {type: INTEGER, nullable: false, min: 0}
+  noise_host_share: {type: DOUBLE, nullable: false, min: 0, max: 1}
+  # host-borne and derived signals (columns 11-36)
+  counted_host_count: {type: INTEGER, nullable: false, min: 0}
+  host_signals_blind: {type: BOOLEAN, nullable: false}
+  is_singleton: {type: BOOLEAN, nullable: false}
+  in_territory: {type: BOOLEAN}                         # null exactly when country_code is null (check below)
+  named_registrant: {type: BOOLEAN, nullable: false}
+  footprint_size: {type: INTEGER, nullable: false, min: 1, max: 50}
+  footprint_band: {type: SMALLINT, nullable: false, min: 0, max: 3}
+  sensitive_stack: {type: BOOLEAN, nullable: false}
+  operator_shape_t1: {type: BOOLEAN, nullable: false}
+  operator_shape_t2: {type: BOOLEAN, nullable: false}
+  operator_name_shape: {type: BOOLEAN, nullable: false}
+  kev_exposed: {type: BOOLEAN, nullable: false}
+  kev_host_count: {type: INTEGER, nullable: false, min: 0}
+  max_cvss: {type: DOUBLE, min: 0, max: 10}             # null when no counted host has a CVSS value (nullable by design)
+  max_cvss_band: {type: SMALLINT, nullable: false, min: 0, max: 3}
+  cert_expired_or_soon: {type: BOOLEAN, nullable: false}
+  cert_issue_host_count: {type: INTEGER, nullable: false, min: 0}
+  eol_stack: {type: BOOLEAN, nullable: false}
+  eol_host_count: {type: INTEGER, nullable: false, min: 0}
+  legacy_tls: {type: BOOLEAN, nullable: false}
+  legacy_tls_host_count: {type: INTEGER, nullable: false, min: 0}
+  risky_service_exposed: {type: BOOLEAN, nullable: false}
+  risky_non_ssh_exposed: {type: BOOLEAN, nullable: false}
+  risky_service_host_count: {type: INTEGER, nullable: false, min: 0}
+  risky_ports: {type: "INTEGER[]", nullable: false}     # exact type is also asserted below (the runner matches types by prefix)
+  exposed_and_outdated: {type: BOOLEAN, nullable: false}
+
+# Shared denylist leakage check on the carried name column. company_name (raw display text) is checked by check_signals_extra.py.
+denylist:
+  column: name_norm
+  rules: shared
+
+checks:
+  # ---- structure -------------------------------------------------------------------------------------------------------------
+  - name: exactly 36 columns (D9.4)
+    sql: "SELECT count(*) FROM (DESCRIBE t)"
+    expect: 36
+  - name: no column outside the 36 named in D9.4 (no raw payload, banner, tags or host-level column)
+    sql: >-
+      SELECT count(*) FROM (DESCRIBE t) WHERE column_name NOT IN ('company_id', 'company_name', 'name_norm', 'identity_source',
+      'identity_confidence', 'host_count', 'distinct_host_ips', 'country_code', 'noise_host_count', 'noise_host_share', 'counted_host_count',
+      'host_signals_blind', 'is_singleton', 'in_territory', 'named_registrant', 'footprint_size', 'footprint_band', 'sensitive_stack',
+      'operator_shape_t1', 'operator_shape_t2', 'operator_name_shape', 'kev_exposed', 'kev_host_count', 'max_cvss', 'max_cvss_band',
+      'cert_expired_or_soon', 'cert_issue_host_count', 'eol_stack', 'eol_host_count', 'legacy_tls', 'legacy_tls_host_count',
+      'risky_service_exposed', 'risky_non_ssh_exposed', 'risky_service_host_count', 'risky_ports', 'exposed_and_outdated')
+  - name: risky_ports is exactly INTEGER[] and no other column is a list type
+    sql: >-
+      SELECT (SELECT count(*) FROM (DESCRIBE t) WHERE column_name = 'risky_ports' AND column_type <> 'INTEGER[]')
+      + (SELECT count(*) FROM (DESCRIBE t) WHERE column_type LIKE '%[]' AND column_name <> 'risky_ports')
+  - name: scalar INTEGER columns are exactly INTEGER and SMALLINT columns exactly SMALLINT (no prefix-match slack)
+    sql: >-
+      SELECT count(*) FROM (DESCRIBE t) WHERE (column_name IN ('host_count', 'distinct_host_ips', 'noise_host_count', 'counted_host_count',
+      'footprint_size', 'kev_host_count', 'cert_issue_host_count', 'eol_host_count', 'legacy_tls_host_count', 'risky_service_host_count')
+      AND column_type <> 'INTEGER') OR (column_name IN ('footprint_band', 'max_cvss_band') AND column_type <> 'SMALLINT')
+  - name: company_id is 16 lowercase hex characters
+    sql: "SELECT count(*) FROM t WHERE NOT regexp_matches(company_id, '^[0-9a-f]{16}$')"
+  - name: name_norm is unique (join key to hosts, D8.5)
+    sql: "SELECT count(*) - count(DISTINCT name_norm) FROM t"
+  # ---- cross-file with companies: fan-out guard and carried columns (D9.9 rules 1 and 3) -------------------------------------
+  - name: cross-file, company_id sets are equal in both directions (no fan-out, no drop)
+    sql: >-
+      SELECT (SELECT count(*) FROM t WHERE company_id NOT IN (SELECT company_id FROM read_parquet('data/silver/companies.parquet')))
+      + (SELECT count(*) FROM read_parquet('data/silver/companies.parquet') WHERE company_id NOT IN (SELECT company_id FROM t))
+  - name: cross-file, the 10 carried columns equal companies on every row (company_id, company_name, name_norm, identity_source, identity_confidence, host_count, distinct_host_ips, country_code, noise_host_count, noise_host_share)
+    sql: >-
+      SELECT count(*) FROM t JOIN read_parquet('data/silver/companies.parquet') c USING (company_id)
+      WHERE t.company_name IS DISTINCT FROM c.company_name OR t.name_norm IS DISTINCT FROM c.name_norm
+      OR t.identity_source IS DISTINCT FROM c.identity_source OR t.identity_confidence IS DISTINCT FROM c.identity_confidence
+      OR t.host_count IS DISTINCT FROM c.host_count OR t.distinct_host_ips IS DISTINCT FROM c.distinct_host_ips
+      OR t.country_code IS DISTINCT FROM c.country_code OR t.noise_host_count IS DISTINCT FROM c.noise_host_count
+      OR t.noise_host_share IS DISTINCT FROM c.noise_host_share
+  - name: cross-file, sum(counted_host_count) equals member host rows counted by the D6.4 rule in hosts (org, or not cdn-tagged)
+    sql: >-
+      SELECT (SELECT sum(counted_host_count) FROM t) - (SELECT count(*) FROM read_parquet('data/silver/hosts.parquet')
+      WHERE identity_source IN ('org', 'cert_o') AND name_norm IS NOT NULL
+      AND (identity_source = 'org' OR NOT list_contains(coalesce(tags, []::VARCHAR[]), 'cdn')))
+  - name: cross-file, sum(host_count) equals member host rows in hosts (identity_source org or cert_o with a name_norm)
+    sql: >-
+      SELECT (SELECT sum(host_count) FROM t) - (SELECT count(*) FROM read_parquet('data/silver/hosts.parquet')
+      WHERE identity_source IN ('org', 'cert_o') AND name_norm IS NOT NULL)
+  # ---- identity and cap flags -------------------------------------------------------------------------------------------------
+  - name: identity_source in (org, cert_o) and identity_confidence in (high, low)
+    sql: "SELECT count(*) FROM t WHERE identity_source NOT IN ('org', 'cert_o') OR identity_confidence NOT IN ('high', 'low')"
+  - name: named_registrant equals (identity_confidence = high) (D9.4 column 15)
+    sql: "SELECT count(*) FROM t WHERE named_registrant IS DISTINCT FROM (identity_confidence = 'high')"
+  - name: is_singleton equals (host_count = 1) (D9.4 column 13)
+    sql: "SELECT count(*) FROM t WHERE is_singleton IS DISTINCT FROM (host_count = 1)"
+  - name: in_territory is null exactly when country_code is null, else country_code in the territory constant (PROVISIONAL placeholder US only; update with the owner's list)
+    sql: >-
+      SELECT count(*) FROM t WHERE in_territory IS DISTINCT FROM (CASE WHEN country_code IS NULL THEN NULL ELSE country_code IN ('US') END)
+  - name: footprint_size equals least(distinct_host_ips, 50)
+    sql: "SELECT count(*) FROM t WHERE footprint_size <> least(distinct_host_ips, 50)"
+  - name: footprint_band by the edges (1 -> 0; 2 to 5 -> 1; 6 to 20 -> 2; above 20 -> 3)
+    sql: >-
+      SELECT count(*) FROM t WHERE footprint_band IS DISTINCT FROM (CASE WHEN distinct_host_ips <= 1 THEN 0 WHEN distinct_host_ips <= 5 THEN 1
+      WHEN distinct_host_ips <= 20 THEN 2 ELSE 3 END)
+  # ---- operator name shape (D9.5 T1, D11.1 T2; patterns copied from the decision text, not from the stage) --------------------------------------
+  - name: operator_shape_t1 equals the D9.5 T1 regex on name_norm
+    sql: >-
+      SELECT count(*) FROM t WHERE operator_shape_t1 IS DISTINCT FROM regexp_matches(name_norm,
+      '(^| )(internet|telekom|communications|hosting|hosted|servers?|broadband|cable|mobile|idc|infrastructure|research|telecom[a-z0-9]*|comunica[a-z0-9]*|network[a-z0-9]*)( |$)|data center|fixed network|(cloud|hosting)( |$)')
+  - name: operator_shape_t2 equals the D11.1 T2 regex on name_norm (D9.5 T2 without the net suffix branch; a plain ...net name is not flagged)
+    sql: >-
+      SELECT count(*) FROM t WHERE operator_shape_t2 IS DISTINCT FROM regexp_matches(name_norm,
+      '(^| )(cloud[a-z0-9]*|host[a-z0-9]*|datacent[a-z0-9]*|rechenzentrum|fiber|fibre|isp|colo|vps|dedicated)( |$)|[a-z0-9]+(telecom|host|hosting|servers?)( |$)')
+  - name: operator_name_shape equals (operator_shape_t1 OR operator_shape_t2) (D9.5 union, D9.4 column 21)
+    sql: "SELECT count(*) FROM t WHERE operator_name_shape IS DISTINCT FROM (operator_shape_t1 OR operator_shape_t2)"
+  # ---- counts and booleans (D9.4 definitions, D9.9 rule 4) --------------------------------------------------------------------
+  - name: counted_host_count is between 0 and host_count
+    sql: "SELECT count(*) FROM t WHERE counted_host_count < 0 OR counted_host_count > host_count"
+  - name: host_signals_blind equals (counted_host_count = 0) (D9.4 column 12)
+    sql: "SELECT count(*) FROM t WHERE host_signals_blind IS DISTINCT FROM (counted_host_count = 0)"
+  - name: a host-blind company is cert_o only (an org host is always counted, D6.4)
+    sql: "SELECT count(*) FROM t WHERE host_signals_blind AND (identity_source <> 'cert_o' OR identity_confidence <> 'low')"
+  - name: host-borne counts (kev, eol, legacy tls, risky) are at most counted_host_count
+    sql: >-
+      SELECT count(*) FROM t WHERE kev_host_count > counted_host_count OR eol_host_count > counted_host_count
+      OR legacy_tls_host_count > counted_host_count OR risky_service_host_count > counted_host_count
+  - name: cert_issue_host_count is at most host_count (certificate signals use every member host, D9.4)
+    sql: "SELECT count(*) FROM t WHERE cert_issue_host_count > host_count"
+  - name: kev_exposed equals (kev_host_count >= 1)
+    sql: "SELECT count(*) FROM t WHERE kev_exposed IS DISTINCT FROM (kev_host_count >= 1)"
+  - name: cert_expired_or_soon equals (cert_issue_host_count >= 1)
+    sql: "SELECT count(*) FROM t WHERE cert_expired_or_soon IS DISTINCT FROM (cert_issue_host_count >= 1)"
+  - name: eol_stack equals (eol_host_count >= 1)
+    sql: "SELECT count(*) FROM t WHERE eol_stack IS DISTINCT FROM (eol_host_count >= 1)"
+  - name: legacy_tls equals (legacy_tls_host_count >= 1)
+    sql: "SELECT count(*) FROM t WHERE legacy_tls IS DISTINCT FROM (legacy_tls_host_count >= 1)"
+  - name: risky_service_exposed equals (risky_service_host_count >= 1)
+    sql: "SELECT count(*) FROM t WHERE risky_service_exposed IS DISTINCT FROM (risky_service_host_count >= 1)"
+  - name: risky_non_ssh_exposed implies risky_service_exposed
+    sql: "SELECT count(*) FROM t WHERE risky_non_ssh_exposed AND NOT risky_service_exposed"
+  - name: risky_ports is a sorted list of distinct values from the D9.4 port list, empty exactly when risky_service_exposed is false
+    sql: >-
+      SELECT count(*) FROM t WHERE NOT list_has_all([22, 3389, 445, 3306, 6379, 27017, 9200, 5900, 23, 2375], risky_ports)
+      OR risky_ports <> list_sort(risky_ports) OR len(risky_ports) <> len(list_distinct(risky_ports))
+      OR (len(risky_ports) = 0) = risky_service_exposed
+  - name: risky_non_ssh_exposed equals (risky_ports holds a port other than 22), and distinct risky ports are at most risky_service_host_count
+    sql: >-
+      SELECT count(*) FROM t WHERE risky_non_ssh_exposed IS DISTINCT FROM (len(list_filter(risky_ports, x -> x <> 22)) > 0)
+      OR len(risky_ports) > risky_service_host_count
+  - name: max_cvss_band is 0 exactly when max_cvss is null; 1 below 7.0; 2 from 7.0 to below 9.0; 3 from 9.0 (D9.4 column 25)
+    sql: >-
+      SELECT count(*) FROM t WHERE max_cvss_band IS DISTINCT FROM (CASE WHEN max_cvss IS NULL THEN 0 WHEN max_cvss >= 9.0 THEN 3
+      WHEN max_cvss >= 7.0 THEN 2 ELSE 1 END)
+  - name: exposed_and_outdated implies risky_service_exposed and (eol_stack or max_cvss >= 7.0) (same-host form, D9.4 column 36)
+    sql: >-
+      SELECT count(*) FROM t WHERE exposed_and_outdated AND (NOT risky_service_exposed OR NOT (eol_stack OR coalesce(max_cvss, 0) >= 7.0))
+  # ---- blind rule (D9.9 rule 5) -------------------------------------------------------------------------------------------------
+  - name: a host-blind company has every host-borne signal false or null (kev, eol, legacy tls, risky, sensitive, exposed_and_outdated, max_cvss, counts 0, empty risky_ports)
+    sql: >-
+      SELECT count(*) FROM t WHERE host_signals_blind AND (kev_exposed OR eol_stack OR legacy_tls OR risky_service_exposed OR risky_non_ssh_exposed
+      OR sensitive_stack OR exposed_and_outdated OR max_cvss IS NOT NULL OR max_cvss_band <> 0 OR kev_host_count <> 0 OR eol_host_count <> 0
+      OR legacy_tls_host_count <> 0 OR risky_service_host_count <> 0 OR len(risky_ports) <> 0)
+  # ---- name hygiene ------------------------------------------------------------------------------------------------------------
+  - name: company_name and name_norm are non-empty and trimmed
+    sql: "SELECT count(*) FROM t WHERE trim(company_name) = '' OR company_name <> trim(company_name) OR trim(name_norm) = '' OR name_norm <> trim(name_norm)"

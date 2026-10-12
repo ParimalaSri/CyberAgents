@@ -1,0 +1,85 @@
+# CyberIntel denylist PREFIX families (PROPOSED, not approved; decisions D1, D2, D4 in docs/ARCHITECTURE.md section 15).
+# Owner accepted these 40 families as listed on 2026-10-11.
+# Five website-builder families (weebly, jimdo, automattic, tumblr, webflow) were added after that on the same date under decision D2 (website
+# builders are infrastructure; owner-approved for automattic = WordPress.com and tumblr; webflow decided by senior-data-engineer under the approved D2,
+# D5 follow-up); they are not part of the 40 the owner accepted.
+# weebly and jimdo are listed in outputs/denylist_keyword_review.md; automattic, tumblr and webflow in outputs/denylist_cleanup_review.md.
+# Rule: a name matches when its NORMALISED form equals the entry or starts with the entry followed by a space
+# (word-boundary prefix). Normalise with scripts/denylist_match.py normalise(): lowercase, punctuation stripped,
+# trailing legal-suffix words removed. Example: "Palo Alto Networks, Inc." -> "palo alto networks" matches "palo alto".
+# Applies to the org text only (D5: the isp text is not matched in the default mode). Entries are already in normalised form.
+# Entries under 4 characters are NOT allowed here (exact-only in denylist.txt): ace, wix, ibm, ovh, aws, gtt.
+# Each family must be checked against distinct orgs before use (outputs/profile_spread_100k.md lists prefix-only hits).
+
+# --- hyperscaler / public cloud ---
+google
+amazon
+microsoft
+alibaba
+aliyun
+tencent
+huawei cloud
+huawei public cloud
+# D8.2: huawei family completion (existing entries covered only some Huawei names); gate in outputs/denylist_cleanup_review.md section 9.
+huawei
+oracle
+ibm cloud
+softlayer
+digitalocean
+digital ocean
+vultr
+linode
+the constant company
+
+# --- CDN / edge / security proxy ---
+cloudflare
+akamai
+fastly
+incapsula
+imperva
+zscaler
+palo alto
+cdnetworks
+edgenext
+
+# --- hosting / VPS / website builders ---
+ovhcloud
+scaleway
+hetzner
+fly io
+shopify
+squarespace
+weebly
+jimdo
+automattic
+tumblr
+webflow
+vercel
+bitly
+godaddy
+hostinger
+hostgator
+contabo
+netcup
+rackspace
+exoscale
+
+# --- named network operators / hosting providers, D6.7 (d); each family has >= 20 rows in the spread sample; gate 39/40 = 97.5% (outputs/denylist_cleanup_review.md section 8) ---
+racknerd
+ntt america
+ionos
+telstra
+vodafone
+fastweb
+uninet
+cliente antel
+administracion nacional de telecomunicaciones
+web com
+psinet
+comcast
+cloudfly
+
+# --- content-delivery / cache-node operators, D2/D7 (D7.1): closed list of content-delivery operators, excluded on hostname evidence (not the name-only gate): Netflix 143/143 rows on nflxvideo.net, Meta and Facebook 27/27 on facebook.com or fbcdn.net. Apple Inc. is deliberately NOT excluded. ---
+netflix
+meta platforms
+facebook

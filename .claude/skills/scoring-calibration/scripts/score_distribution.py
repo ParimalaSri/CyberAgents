@@ -20,15 +20,22 @@ def print_summary(con, score):
     n, lo, hi, mean = con.execute(
         f'SELECT count("{score}"), min("{score}"), max("{score}"), avg("{score}") FROM t'
     ).fetchone()
+    if not n:
+        print(f"{score}: 0 rows (no scores to summarise)")
+        return False
     print(f"{score}: n={n:,} min={lo} max={hi} mean={mean:.2f}")
     for q in QUANTILES:
         value = con.execute(f'SELECT quantile_cont("{score}", {q}) FROM t').fetchone()[0]
         print(f"  p{int(q * 100):<3} {value:.2f}")
+    return True
 
 
 def print_histogram(con, score, buckets):
     """Print an ASCII histogram so the shape of the distribution is visible."""
     lo, hi = con.execute(f'SELECT min("{score}"), max("{score}") FROM t').fetchone()
+    if lo is None:
+        print("histogram: no scores")
+        return
     width = (hi - lo) / buckets or 1
     rows = con.execute(
         f'SELECT least(floor(("{score}" - {lo}) / {width}), {buckets - 1})::INT AS b, count(*) '
@@ -53,7 +60,7 @@ def print_bands(con, score, contact, review):
     print(f"\nbands at contact >= {contact}, review >= {review}:")
     for band in ("contact", "review", "skip"):
         c = counts.get(band, 0)
-        print(f"  {band:<8} {c:>10,}  {100 * c / total:5.1f}%")
+        print(f"  {band:<8} {c:>10,}  {(100 * c / total if total else 0.0):5.1f}%")
 
 
 def main():

@@ -1,0 +1,11 @@
+# CyberIntel denylist PATTERNS (PROPOSED, not approved). A separate rule type: these are NOT organisation names.
+# Matching (scripts/denylist_match.py matches_pattern): case-insensitive.
+#   - CIDR entries match the host IP address (ip_str / ipv6) AND the literal text of the org field, because the raw data
+#     contains org = "139.162.0.0/16" (62 rows in the spread sample, Linode / Akamai Connected Cloud address space).
+#   - glob entries (*) match the org text. The isp text is not matched in the default mode (D5).
+# A match marks the row as infrastructure (D4 rule 2: a CIDR hit on the host IP gives infra_reason ip_pattern, a name hit on the org text gives org_pattern).
+# Moved here from denylist.txt on 2026-10-11 (not removed, not weakened).
+
+139.162.0.0/16
+*se5-ptk*
+*se3-ptk*
